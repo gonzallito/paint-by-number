@@ -1,0 +1,8 @@
+id,filename,category,difficulty,subject_present,lighting,notes
+# Track the corpus here; the images themselves are gitignored (personal + bulky).
+# category:   pet | portrait | group | landscape | object | screenshot
+# difficulty: easy | medium | hard
+# lighting:   good | dim | backlit | mixed
+# Aim for ~50 rows weighted toward hard cases. Real users do not shoot like photographers.
+# Example:
+# 001,dog_couch.jpg,pet,hard,yes,dim,"black dog on dark sofa - low subject/bg contrast"

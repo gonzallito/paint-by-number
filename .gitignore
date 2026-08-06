@@ -1,0 +1,40 @@
+# --- Corpus: input photos are personal and bulky. Manifest is tracked, images are not.
+corpus/**
+!corpus/manifest.csv
+!corpus/.gitkeep
+
+# --- Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# --- ONNX / model weights (downloaded on demand, never committed)
+*.onnx
+.u2net/
+
+# --- Flutter / Dart
+app/build/
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/ios/Pods/
+app/ios/.symlinks/
+app/android/.gradle/
+app/android/local.properties
+*.iml
+
+# --- Service
+service/.env
+*.sqlite
+*.db
+
+# --- OS / editor
+.DS_Store
+Thumbs.db
+*.swp
