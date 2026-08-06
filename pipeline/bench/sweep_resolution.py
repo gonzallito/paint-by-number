@@ -36,8 +36,13 @@ for p in PATHS:
             q = quantize.quantize(flat, N_COLOURS, subject_mask=mask)
             lab = color.rgb_to_lab(flat)
             seg = segment.segment(
-                q.labels, q.n_colours, lab, q.palette_lab,
-                budget=BUDGET, subject_mask=mask, min_radius_scale=scale,
+                q.labels,
+                q.n_colours,
+                lab,
+                q.palette_lab,
+                budget=BUDGET,
+                subject_mask=mask,
+                min_radius_scale=scale,
             )
             num = numbering.place(seg.labels, seg.region_colour, seg.n_regions)
             elapsed = time.time() - t
@@ -59,12 +64,18 @@ for res in RESOLUTIONS:
         q = quantize.quantize(flat, N_COLOURS, subject_mask=mask)
         lab = color.rgb_to_lab(flat)
         seg = segment.segment(
-            q.labels, q.n_colours, lab, q.palette_lab,
-            budget=BUDGET, subject_mask=mask, min_radius_scale=0.60,
+            q.labels,
+            q.n_colours,
+            lab,
+            q.palette_lab,
+            budget=BUDGET,
+            subject_mask=mask,
+            min_radius_scale=0.60,
         )
         num = numbering.place(seg.labels, seg.region_colour, seg.n_regions)
         times.append(time.time() - t)
         counts.append(seg.n_regions)
         unlab.append(num.unlabelled_fraction)
-    print(f"{res:11d}px {int(np.median(counts)):16,d} {np.mean(unlab):16.1%} "
-          f"{np.mean(times):13.1f}s")
+    print(
+        f"{res:11d}px {int(np.median(counts)):16,d} {np.mean(unlab):16.1%} {np.mean(times):13.1f}s"
+    )

@@ -55,7 +55,18 @@ BACKGROUND_COST_SCALE = 0.30
 # artefacts rather than design — because a discount only changes merge *order*, not the
 # point at which merging stops. Forcing genuinely coarser background regions is what
 # produces the few large flat shapes an illustrator would use.
-BACKGROUND_MIN_RADIUS_MULTIPLIER = 2.6
+#
+# Now kept mild, because subject prioritisation is handled properly by the explicit budget
+# split (see DEFAULT_SUBJECT_BUDGET_SHARE) rather than by distorting this floor. Earlier
+# values of 2.6 and 1.8 were attempts to prioritise the subject through region *size*, which
+# only ever controlled it indirectly: at 2.6 canvases collapsed to 16-259 regions, and at 1.8
+# a real portrait still gave the subject only 21% of regions for 36% of the frame.
+BACKGROUND_MIN_RADIUS_MULTIPLIER = 2.0
+
+# Fraction of the region budget reserved for the subject regardless of its area. Backgrounds
+# are usually the least interesting part of a photo and often the most colour-varied, so they
+# need an explicit cap rather than a discount.
+DEFAULT_SUBJECT_BUDGET_SHARE = 0.80
 
 # A region counts as "subject" if this fraction of its pixels fall inside the mask.
 SUBJECT_PIXEL_MAJORITY = 0.5
@@ -365,24 +376,45 @@ class _Merger:
                 if self._undersized(survivor) or self._undersized(other):
                     self._push(heap, survivor, other)
 
-    def reduce_to(self, budget: int) -> None:
-        """Pass 2: merge the cheapest legal pair until at most ``budget`` regions remain."""
-        if self.remaining <= budget:
+    def count_side(self, subject_side: bool) -> int:
+        """Living regions on one side of the silhouette."""
+        return int(
+            sum(
+                1
+                for i in range(self.n)
+                if self.alive[i] and bool(self.is_subject[i]) == subject_side
+            )
+        )
+
+    def reduce_to(self, budget: int, subject_side: bool | None = None) -> None:
+        """Pass 2: merge the cheapest legal pair until at most ``budget`` regions remain.
+
+        ``subject_side`` restricts the pass to one side of the silhouette. Because no edge
+        ever crosses the silhouette, the two sides are genuinely independent sub-problems,
+        which is what lets the caller give each an explicit budget instead of letting them
+        compete on colour cost alone.
+        """
+        current = self.remaining if subject_side is None else self.count_side(subject_side)
+        if current <= budget:
             return
+
         heap: list = []
         for a in range(self.n):
             if not self.alive[a]:
+                continue
+            if subject_side is not None and bool(self.is_subject[a]) != subject_side:
                 continue
             for b in self.neighbours[a]:
                 if b <= a or not self.alive[b] or not self._legal(a, b):
                     continue
                 self._push(heap, a, b)
 
-        while self.remaining > budget:
+        while current > budget:
             popped = self._pop_valid(heap)
             if popped is None:
                 break
             survivor = self._merge(*popped)
+            current -= 1
             for other in self.neighbours[survivor]:
                 if self.alive[other] and self._legal(survivor, other):
                     self._push(heap, survivor, other)
@@ -420,12 +452,14 @@ def segment(
     subject_mask: np.ndarray | None = None,
     preserve_silhouette: bool = True,
     min_radius_scale: float = DEFAULT_MIN_RADIUS_SCALE,
+    subject_budget_share: float = DEFAULT_SUBJECT_BUDGET_SHARE,
 ) -> Segmentation:
     """Extract regions from a quantised image and merge them.
 
     ``budget`` is a ceiling on region count, not a target. ``min_radius_scale`` multiplies
     the resolution-derived minimum effective radius, so a variant can trade comfortable tap
-    targets against detail.
+    targets against detail. ``subject_budget_share`` is the fraction of the region budget
+    reserved for the subject, independent of how much of the frame it occupies.
     """
     labels, region_colour = _initial_regions(
         quantised, n_colours, subject_mask if preserve_silhouette else None
@@ -458,7 +492,32 @@ def segment(
         preserve_silhouette=preserve_silhouette,
     )
     merger.absorb_undersized()
-    merger.reduce_to(budget)
+
+    if merger.has_subject:
+        # Give each side of the silhouette its own budget rather than letting them compete
+        # on colour cost. Cost-based competition allocates budget to colour *variation*, and
+        # perceptual importance is not colour variation: a subject in a flat black suit has
+        # few boundaries and all the importance, while the blurred bokeh behind it has strong
+        # colour variation and none. Left to compete, the budget flows exactly backwards —
+        # measured on a real portrait, the subject took 21% of regions for 36% of the frame
+        # while the out-of-focus background absorbed the rest as long wavy bands.
+        subject_target = max(1, int(round(budget * subject_budget_share)))
+        background_target = max(1, budget - subject_target)
+
+        # Headroom transfers in one direction only. An unused *background* allowance may go
+        # to the subject, but never the reverse: the background share is a hard ceiling, not
+        # an entitlement. Donating a flat subject's unused allowance to the background undoes
+        # the whole point — measured on a portrait in a black suit, it let the out-of-focus
+        # backdrop keep 80% of the regions because the subject could not use its own share.
+        background_have = merger.count_side(False)
+        if background_have < background_target:
+            subject_target += background_target - background_have
+
+        merger.reduce_to(subject_target, subject_side=True)
+        merger.reduce_to(background_target, subject_side=False)
+    else:
+        merger.reduce_to(budget)
+
     blocked = merger.unsatisfied(budget)
     labels = merger.parent_map()[labels]
 

@@ -35,14 +35,24 @@ class Variant:
     description: str
 
 
-# Region count is content-determined rather than tuning-determined, so these presets vary
-# the *character* of the output more than they hit specific counts. Measured on the dev set:
-# a 2.3x larger palette buys only ~1.55x the regions, and dropping the radius floor to 0.40
-# yields 3x the regions at 18-24% of them unnumberable.
+# Region count is content-determined rather than tuning-determined, so these presets vary the
+# *character* of the output more than they hit specific counts: a 2.3x larger palette buys
+# only ~1.55x the regions.
+#
+# Radius floors recalibrated against the real corpus (`bench/recalibrate.py`). The earlier
+# dev-set values produced 16-259 region canvases — too quick to be satisfying — because dev
+# subjects were large and high-texture while real ones are smaller and often flat.
+#
+# The floor trades region count directly against unnumberable regions. Measured medians at
+# background multiplier 1.8: floor 0.60 -> 121 regions / 1% unnumbered; 0.50 -> 158 / 3%;
+# 0.40 -> 215 / 10%; 0.30 -> 339 / 22%. There is no setting that gives both, which is why
+# leader lines for small regions are on the Phase 1 list.
 VARIANTS: dict[str, Variant] = {
-    "simple": Variant("simple", 12, 400, 0.85, "few large regions, quick to finish"),
-    "standard": Variant("standard", 18, 900, 0.60, "balanced detail"),
-    "detailed": Variant("detailed", 24, 1500, 0.50, "maximum detail, some regions unnumbered"),
+    "simple": Variant("simple", 12, 400, 0.60, "few large regions, every one numbered"),
+    "standard": Variant("standard", 18, 900, 0.46, "balanced detail"),
+    "detailed": Variant(
+        "detailed", 24, 1500, 0.38, "maximum detail; small regions need leader lines"
+    ),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 

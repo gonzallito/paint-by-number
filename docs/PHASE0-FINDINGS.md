@@ -163,3 +163,110 @@ questions that matter:
 
 Two of the four are about subject-mask robustness, which makes sense: subject segmentation is
 where most of the quality comes from, so it is also where most of the risk sits.
+
+
+---
+
+# Addendum: results on the real corpus
+
+9 real photos (0.4-17.9 MP): four portraits, two 17.9MP travel shots, one illustration, one
+badge graphic, one meme photo. This section supersedes the tuning numbers above; the
+development-set constants were recalibrated against these images via `bench/recalibrate.py`.
+
+## The good news
+
+**Subject detection worked on all 9 images** (27-62% coverage, a single clean blob each),
+versus 2 outright failures in 7 development images. Robustness is better than expected.
+
+**Performance held**: 27 conversions in 45.9s, ~1.7s each, including two 17.9MP inputs.
+
+**Filled results on portraits are genuinely good.** The clearest test case is recognisable at
+`standard` and `detailed` — skin tones, clothing and props all read correctly.
+
+## The bad news, and it is structural
+
+**Cost-based merging allocates region budget to colour *variation*, but perceptual importance
+is not colour variation.** This is the deepest finding of Phase 0 and it is not fixable with a
+constant.
+
+The failing case is a portrait: a man in a **flat black tuxedo** against an **out-of-focus
+bokeh backdrop**. The subject carries all the importance and almost no colour boundaries; the
+backdrop carries no importance and strong colour boundaries. Left to compete on merge cost, the
+budget flows exactly backwards — the subject received 21% of regions for 36% of the frame,
+while the blurred backdrop absorbed the rest as long horizontal wavy bands that are actively
+unpleasant to colour.
+
+Three mechanisms were tried against this:
+
+| Attempt | Result |
+|---|---|
+| Discount background merge cost (`BACKGROUND_COST_SCALE`) | Insufficient — a discount changes merge *order*, not where merging stops |
+| Coarser background radius floor (`×2.6`, then `×1.8`) | Controls region *size* but only indirectly controls count; at ×2.6 canvases collapsed to 16-259 regions |
+| **Explicit per-side budget split** (adopted) | Works as designed, and exposed the real limit below |
+
+The budget split is the right mechanism — since no region ever merges across the silhouette,
+the two sides are independent sub-problems, so each can simply be given a budget. It revealed
+that the actual constraint is different from what was assumed:
+
+> For the failing portrait at `standard`, the output is **51 subject regions + 225 background
+> regions**. The background cap works correctly. The subject only has 51 numberable regions
+> *available*, because a flat black tuxedo has no colour structure to subdivide.
+
+**You cannot create numberable regions in a subject that has none.** Finer floors would produce
+more regions, but they would be unnumberable slivers. This is a wall, not a tuning problem.
+
+## Recalibrated constants
+
+| Constant | Was | Now | Why |
+|---|---|---|---|
+| `BACKGROUND_MIN_RADIUS_MULTIPLIER` | 2.6 | 2.0 | 2.6 collapsed real canvases to 16-259 regions |
+| `DEFAULT_SUBJECT_BUDGET_SHARE` | — | 0.80 | New mechanism; replaces size-based prioritisation |
+| `simple` radius floor | 0.85 | 0.60 | Dev-set floors were far too aggressive on real photos |
+| `standard` radius floor | 0.60 | 0.46 | |
+| `detailed` radius floor | 0.50 | 0.38 | |
+
+Headroom transfer between sides is deliberately **one-directional**: an unused background
+allowance may go to the subject, never the reverse. Allowing the reverse let a flat subject
+donate its unused share to the backdrop, restoring the exact problem the cap exists to prevent.
+
+## Results after recalibration
+
+27 conversions, median 155 regions, mean 6.2% unnumbered.
+
+| Variant | Regions | Unnumbered |
+|---|---|---|
+| `simple` | 50-165 | 0-1.8% |
+| `standard` | 102-299 | 0.4-10.5% |
+| `detailed` | 155-390 | 4.0-21.8% |
+
+`simple` is comfortably shippable. `standard` is usable. **`detailed` is not shippable as-is** —
+up to 21.8% of its regions cannot carry a number, so it depends on leader-line rendering, which
+does not exist yet.
+
+## Correction to an earlier claim
+
+The main findings above treated the static colourable-page render as the quality bar. That was
+wrong. Numbers are 7-13px on a 1400px canvas, so they vanish when the page is scaled to fit a
+contact sheet — but in the app numbers render at **constant screen size**, so they are legible
+at any zoom. The static page render systematically understates numbering quality; the 1:1 crop
+panel is the honest view.
+
+The unnumbered *fraction* is nevertheless real and scale-free: it measures region shape relative
+to the canvas, so rendering the artifact at 4096px does not improve it.
+
+## Revised Phase 1 priorities
+
+Reordered by what the real corpus showed:
+
+1. **Face-aware region allocation.** The single highest-value fix. Subject-level allocation
+   cannot help a flat-clothed person, but the *face* is where detail is both present and
+   meaningful. Portraits are a core use case and currently the weakest category.
+2. **Boundary simplification.** Still the fix for both the contour-map appearance and the
+   sliver problem — rounder regions raise the achievable region count at a given
+   numberability. This is what unblocks `detailed`.
+3. **Leader lines**, without which `detailed` cannot ship.
+4. **Background structure detection.** Blurred/bokeh backgrounds should collapse to a handful
+   of shapes; a detailed cityscape should not. A blur measure restricted to the background
+   would distinguish them.
+5. Recalibrate the texture→flatten table (still fitted to development images).
+6. Label-map upscaling for the high-resolution artifact.

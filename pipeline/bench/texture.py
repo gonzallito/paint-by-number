@@ -17,7 +17,9 @@ def region_count(img):
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
     _, lb, _ = cv2.kmeans(Z, K, None, crit, 3, cv2.KMEANS_PP_CENTERS)
     q = lb.reshape(img.shape[:2]).astype(np.int32)
-    return sum(max(0, cv2.connectedComponents((q == i).astype(np.uint8), 8)[0] - 1) for i in range(K))
+    return sum(
+        max(0, cv2.connectedComponents((q == i).astype(np.uint8), 8)[0] - 1) for i in range(K)
+    )
 
 
 def lapvar(img):

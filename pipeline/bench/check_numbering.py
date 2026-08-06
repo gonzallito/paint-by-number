@@ -10,8 +10,10 @@ WORK = 1400
 N_COLOURS = 16
 BUDGET = 1500
 
-print(f"{'image':20s} {'regions':>8s} {'place s':>8s} {'r median':>9s} {'r min':>6s} "
-      f"{'unlabelled':>11s} {'centre in region':>17s}")
+print(
+    f"{'image':20s} {'regions':>8s} {'place s':>8s} {'r median':>9s} {'r min':>6s} "
+    f"{'unlabelled':>11s} {'centre in region':>17s}"
+)
 print("-" * 88)
 
 totals = []
@@ -36,9 +38,11 @@ for p in images.list_images("../corpus/dev"):
     inside_pct = inside.mean()
 
     totals.append(num.unlabelled_fraction)
-    print(f"{p.stem:20s} {seg.n_regions:8,d} {elapsed:7.2f}s "
-          f"{np.median(num.radii):9.1f} {num.radii.min():6.1f} "
-          f"{num.unlabelled_fraction:10.1%} {inside_pct:16.1%}")
+    print(
+        f"{p.stem:20s} {seg.n_regions:8,d} {elapsed:7.2f}s "
+        f"{np.median(num.radii):9.1f} {num.radii.min():6.1f} "
+        f"{num.unlabelled_fraction:10.1%} {inside_pct:16.1%}"
+    )
 
 print("-" * 88)
 print(f"{'mean unlabelled':20s} {np.mean(totals):>8.1%}")
@@ -73,5 +77,7 @@ for p in images.list_images("../corpus/dev"):
 print("\n" + "=" * 88)
 print(f"Required inscribed radius at min digit height {numbering.MIN_DIGIT_HEIGHT_AT_1400:.0f}px:")
 for digits in (1, 2):
-    print(f"  {digits}-digit number -> radius >= "
-          f"{numbering.required_radius(digits, numbering.MIN_DIGIT_HEIGHT_AT_1400):.1f}px")
+    print(
+        f"  {digits}-digit number -> radius >= "
+        f"{numbering.required_radius(digits, numbering.MIN_DIGIT_HEIGHT_AT_1400):.1f}px"
+    )
