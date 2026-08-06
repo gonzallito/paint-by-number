@@ -9,8 +9,19 @@ See `ROADMAP.md` for full phasing and estimates.
 
 ## Current status
 
-**Phase 0 — Feasibility spike.** Scaffold and toolchain verified. Pipeline not yet written.
-Corpus not yet assembled.
+**Phase 0 — Feasibility spike, complete on the development set.** Pipeline runs end to end at
+~1.9s per conversion. Verdict: proceed, with the "colourable page reads as a contour map"
+problem as the main carried risk. Full assessment in `docs/PHASE0-FINDINGS.md`.
+
+**The real corpus is still outstanding, and it is what actually gates Phase 1.** The dev set
+(`pbn fetch`) is 7 images — 4 small scikit-image samples, 3 arbitrary stock photos — all well
+lit. It cannot answer whether dim indoor pet photos, group shots or backlit subjects produce
+usable subject masks, and subject detection already failed outright on 2 of the 7.
+
+```bash
+cd pipeline
+uv run pbn convert --input ../corpus/dev --out ../out   # regenerate contact sheets
+```
 
 ## Decisions already made (and why)
 
@@ -27,6 +38,10 @@ Corpus not yet assembled.
 | **Variant picker (2–3 outputs)** | Converts a quality gamble into a user choice, transferring ownership of the result. Load-bearing for perceived quality — do not cut. |
 | **Palette ordered by luminance** (1 = lightest) | More intuitive than frequency ordering; canvas reads as a value study while in progress. |
 | **Distance transform for number placement** | `cv2.distanceTransform` + argmax on the region mask gives the most-interior point *and* the inscribed radius (which tells you if the digit fits). Simpler and more robust than polygon pole-of-inaccessibility since regions are already rasters. |
+| **Constrain effective radius (`2·area/perimeter`), never area** | Measured: an area floor left 65% of regions unable to hold a digit, and 100% of those failures had *adequate area* with inscribed radius 2.2-3.0px. Colour-gradient boundaries produce slivers. Switching to effective radius took unnumbered from 65% → 1.1%. |
+| **Bilateral filtering for flattening, not mean-shift** | Measured, against expectation: mean-shift gave 0.64x region reduction at 2.33s; bilateral 0.50x at 0.03s. |
+| **Segment at 1400px, always** | Measured: raising working resolution does *not* increase region count (131 → 124 median from 1400 → 2800px) because thresholds and content scale together, while cost rises. The high-res artifact must come from upscaling the label map. |
+| **Own merge implementation, not `skimage.graph`** | Needed count-based stopping (the library only thresholds on colour similarity), and `skimage.graph.RAG` builds adjacency via `ndi.generic_filter` with a per-pixel Python callback, which dominates runtime at 1.5MP. Adjacency here is array shifts + an int64 pair-key bincount. |
 
 ## Artifact contract (the key interface)
 
@@ -57,6 +72,41 @@ uv run pbn doctor              # verify toolchain
 
 Pinned to Python 3.12. Verified working: OpenCV 5.0, scikit-image 0.26, networkx 3.6,
 rembg 2.0.77.
+
+### Sandbox quirks
+
+- **`fs_write` outside `/projects/sandbox` silently fails.** The file is redirected into a
+  session snapshot directory and does not appear at the requested path. Keep scratch files in
+  the workspace.
+- **`/tmp` does not persist between `execute_bash` calls.** Hence the gitignored
+  `pipeline/scratch/` (benchmarks) and `pipeline/.cache/` (subject masks).
+
+### Pipeline traps that cost real time
+
+- **Two constraints require two merge passes.** A single loop conditioned on "count > budget
+  *or* anything undersized" pops the globally cheapest edge, which usually does not touch an
+  undersized region — so silhouette-isolated specks keep the condition true and the whole
+  image merges away. Photos collapsed to 1-24 regions. Undersized absorption must be its own
+  pass, restricted to edges touching an undersized region.
+- **Splitting initial connected components by the subject mask is mandatory.** Refusing to
+  *merge* across the silhouette is not enough: a white cat on a white couch quantises to one
+  colour and connects, so plain CC already returns one straddling region.
+- **Keep resolution-scaled units consistent across stages.** The merge floor scaled with
+  resolution while digit height was fixed in pixels, so a 451px canvas guaranteed 2.1px of
+  interior room while numbering demanded 6.4px → 67% unnumbered with both stages working
+  correctly in isolation.
+- **Cost discounts change merge order, not where merging stops.** Discounting background merges
+  left backgrounds blotchy; only a genuinely coarser background radius floor
+  (`BACKGROUND_MIN_RADIUS_MULTIPLIER`) produced large flat shapes. It must be gated on a
+  subject actually being detected, or subject-less images treat every region as background and
+  over-merge.
+- **The palette's subject flags must be permuted with the palette.** Luminance ordering
+  interleaves subject and background entries, so a count of subject colours is not enough —
+  track the boolean array.
+- **Contact sheets are composited with PIL, not matplotlib.** The gridspec version produced
+  unpredictable vertical gaps and floated palette strips under the wrong columns.
+- **Never smoke-test on random noise** (see below) and never judge the colourable page from a
+  scaled-down panel — the sheet includes a 1:1 crop for exactly that reason.
 
 ### Toolchain gotchas
 

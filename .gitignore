@@ -38,3 +38,8 @@ service/.env
 .DS_Store
 Thumbs.db
 *.swp
+
+# Scratch benchmarks and caches (in-workspace because /tmp does not persist
+# between tool invocations in the sandbox)
+pipeline/scratch/
+pipeline/.cache/
