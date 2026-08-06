@@ -1,5 +1,5 @@
 # --- Corpus: input photos are personal and bulky. Manifest is tracked, images are not.
-corpus/**
+# corpus/**
 !corpus/manifest.csv
 !corpus/.gitkeep
 
