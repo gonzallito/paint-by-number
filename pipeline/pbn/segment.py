@@ -68,6 +68,12 @@ BACKGROUND_MIN_RADIUS_MULTIPLIER = 2.0
 # need an explicit cap rather than a discount.
 DEFAULT_SUBJECT_BUDGET_SHARE = 0.80
 
+# Shape term in the merge cost. Pairs with little shared border are penalised so that merging
+# builds compact regions rather than chains. The exponent controls how strongly shape competes
+# with colour; the epsilon keeps point-contact pairs finite rather than infinitely expensive.
+CONTACT_EXPONENT = 0.75
+CONTACT_EPSILON = 0.02
+
 # A region counts as "subject" if this fraction of its pixels fall inside the mask.
 SUBJECT_PIXEL_MAJORITY = 0.5
 
@@ -276,15 +282,32 @@ class _Merger:
         """
         return 2.0 * self.area[i] / max(self.perimeter[i], 1.0)
 
+    def _contact(self, i: int, j: int) -> float:
+        """Shared border as a fraction of the smaller region's perimeter, in 0..1.
+
+        A proxy for how compact the merged region will be. Two regions sharing most of a
+        perimeter fuse into a blob; two touching along a sliver of their outlines fuse into a
+        dumbbell or a snake. Discouraging the latter is the only lever that addresses region
+        *elongation*, which is the real reason regions cannot hold numbers — boundary smoothing
+        was measured and only improved effective radius by 2%, because smoothing a snake leaves
+        a smooth snake.
+        """
+        shared = self.neighbours[i].get(j, 0.0)
+        smaller_perimeter = max(1.0, min(self.perimeter[i], self.perimeter[j]))
+        return min(1.0, shared / smaller_perimeter)
+
     def _cost(self, i: int, j: int) -> float:
-        """Colour difference, discounted for slivers, small regions and background pairs."""
+        """Colour difference, adjusted for sliver size, shape outcome and background priority."""
         difference = float(np.sqrt(np.sum((self._mean_lab(i) - self._mean_lab(j)) ** 2)))
         smaller = min(self.effective_radius(i), self.effective_radius(j))
         # Slivers and micro-facets merge nearly free; full colour cost applies only once a
         # region is round enough and big enough to work as its own tap target.
         size_factor = min(1.0, smaller / self.radius_ref)
         scale = 1.0 if (self.is_subject[i] or self.is_subject[j]) else BACKGROUND_COST_SCALE
-        return difference * size_factor * scale
+        # Dividing by contact makes well-joined pairs cheap and barely-touching pairs
+        # expensive, so the merger builds blobs instead of chains.
+        shape_factor = 1.0 / (self._contact(i, j) + CONTACT_EPSILON) ** CONTACT_EXPONENT
+        return difference * size_factor * scale * shape_factor
 
     def _legal(self, i: int, j: int) -> bool:
         if self.preserve_silhouette and self.is_subject[i] != self.is_subject[j]:

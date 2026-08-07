@@ -24,11 +24,16 @@ from pbn import color
 # unwieldy on a phone. Curated illustration works at 8-12 because an artist designed
 # within that budget; photographs need more, especially for skin tones.
 MIN_COLOURS = 8
-MAX_COLOURS = 32
+MAX_COLOURS = 64
 
 # Palette entries closer than this in CIE76 are visually near-identical. Two numbers the
 # user cannot tell apart is worse than one, so they get folded together.
-DEDUPE_DELTA_E = 6.0
+#
+# Lowered from 6.0, which was silently capping large palettes: asking for 48 colours returned
+# only 33-48 depending on the image, so the requested tier was not what the user actually got.
+# At 3.0 we keep 43-48 of 48. ~3.0 is still comfortably above the just-noticeable difference
+# for swatches shown side by side, which is how the palette tray presents them.
+DEDUPE_DELTA_E = 3.0
 
 # Subject colour allocation: its share of the palette is its share of the frame plus this
 # boost, clamped. A subject covering 5% of the frame still earns 40% of the colours.

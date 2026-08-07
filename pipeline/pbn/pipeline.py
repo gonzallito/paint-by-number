@@ -47,11 +47,19 @@ class Variant:
 # background multiplier 1.8: floor 0.60 -> 121 regions / 1% unnumbered; 0.50 -> 158 / 3%;
 # 0.40 -> 215 / 10%; 0.30 -> 339 / 22%. There is no setting that gives both, which is why
 # leader lines for small regions are on the Phase 1 list.
+# Colour counts follow the tiers that commercial custom photo-to-paint-by-number services
+# actually sell — 24 / 36 / 48 — which the earlier 12 / 18 / 24 undershot by a full tier (12 is
+# the children's range). Measured on the real corpus, raising the palette cuts subject
+# reconstruction error by 27% and it plateaus at 48, landing on the same ceiling the industry
+# settled on independently.
+#
+# An earlier sweep judged palette size by region count and wrongly concluded it barely mattered.
+# Palette size buys colour *fidelity*, which is what "it does not look like the photo" means.
 VARIANTS: dict[str, Variant] = {
-    "simple": Variant("simple", 12, 400, 0.60, "few large regions, every one numbered"),
-    "standard": Variant("standard", 18, 900, 0.46, "balanced detail"),
+    "simple": Variant("simple", 24, 600, 0.60, "fewer, larger regions; every one numbered"),
+    "standard": Variant("standard", 36, 1200, 0.46, "balanced; closest to the photo per effort"),
     "detailed": Variant(
-        "detailed", 24, 1500, 0.38, "maximum detail; small regions need leader lines"
+        "detailed", 48, 2400, 0.38, "most faithful; small regions need leader lines"
     ),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")

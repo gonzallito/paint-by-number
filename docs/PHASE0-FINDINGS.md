@@ -270,3 +270,93 @@ Reordered by what the real corpus showed:
    would distinguish them.
 5. Recalibrate the texture→flatten table (still fitted to development images).
 6. Label-map upscaling for the high-resolution artifact.
+
+
+---
+
+# Addendum 2: palette size, and two failed attempts at region shape
+
+## Palette size was calibrated a full tier too low
+
+Commercial custom photo-to-paint-by-number services sell **24 / 36 / 48** colour tiers and steer
+portraits toward 36-48; 6-12 colours is the children's range. Our variants shipped 12 / 18 / 24 —
+so the most detailed option we offered matched the industry's *entry* tier, and `simple` was a
+kids' kit. Sources: [tier guidance](https://paintwithnumber.com/pages/what-is-the-difference-between-24-36-and-48-colors),
+[custom photo kits](https://justpaintbynumber.com/products/custom-paint-by-numbers-kit-from-any-photo/).
+*(Content rephrased for licensing compliance.)*
+
+Measured on the real corpus, subject reconstruction error against palette size:
+
+| requested k | kept | subject ΔE | vs k=18 | regions | unnumbered |
+|---|---|---|---|---|---|
+| 18 | 16 | 5.03 | — | 227 | 12.0% |
+| 24 | 20 | 4.70 | −6% | 271 | 13.7% |
+| 32 | 28 | 4.01 | −20% | 310 | 14.1% |
+| 40 | 34 | 3.86 | −23% | 321 | 15.7% |
+| **48** | **40** | **3.68** | **−27%** | **339** | 18.6% |
+| 56 | 45 | 3.68 | −27% | 365 | 17.6% |
+
+Fidelity improves 27% and then plateaus at 48 — the same ceiling the industry arrived at
+independently. Variants are now 24 / 36 / 48.
+
+**An earlier sweep judged palette size by region count and concluded it barely helped. That was
+the wrong metric.** Palette size buys colour *fidelity*, which is precisely what "it doesn't look
+like the photo" means. Region count was never the complaint.
+
+`DEDUPE_DELTA_E` was also silently capping large palettes: at 6.0, asking for 48 returned 33-48
+depending on the image, so the user would not have received the tier they chose. Lowered to 3.0,
+which keeps 43-48 of 48 and stays above the just-noticeable difference for side-by-side swatches.
+
+## Two attempts at rounder regions, both measured, both largely failed
+
+Regions that cannot hold a number are slivers, so making regions rounder ought to fix numbering
+*and* the contour-map appearance. Two mechanisms were built and measured.
+
+**1. Boundary smoothing** (`pbn/smooth.py`) — iterative 8-neighbourhood majority relaxation on
+boundary pixels, i.e. discrete curvature flow. Result: median effective radius **+2%**,
+unnumbered **−0.6%**. Negligible.
+
+The reason is worth keeping: the regions are not *rough*, they are **elongated**. They snake
+across tens of pixels. Smoothing the edges of a snake yields a smooth snake. Local relaxation
+cannot change global shape.
+
+**2. Shape-aware merge cost** (`CONTACT_EXPONENT`) — divide merge cost by the shared border as a
+fraction of the smaller perimeter, so well-joined pairs fuse into blobs and barely-touching pairs
+are discouraged from forming chains. Result: **+18% more regions** at the same radius floor
+(314 → 369) and median radius +3%, but unnumbered moved only **−0.2%**.
+
+The contact term is kept because more regions at equal comfort is free value. But the conclusion
+about numbering is now well supported by two independent negative results:
+
+> **The unnumberable regions are thin in the source photograph** — edges, outlines, gaps between
+> objects — not artefacts of merging. No amount of shape engineering removes them, which is
+> exactly why commercial paint-by-number kits use leader lines.
+
+Leader lines are therefore not a nice-to-have workaround; they are the correct solution, and the
+only thing standing between `detailed` and being shippable.
+
+## What the 48-colour output shows
+
+Filled results are markedly closer to the source: facial modelling, fabric shading and metallic
+highlights all survive where 24 colours flattened them. The reviewer's preference for the most
+detailed variant is supported by the fidelity numbers.
+
+It also relocates the quality problem. With the subject now well served, **the background is the
+dominant visual offender**: an out-of-focus backdrop of crowd and stage lighting becomes long
+parallel diagonal bands spanning the page. Those bands are *faithful* to the photo and *terrible*
+to colour. Faithfulness and appeal diverge, and here appeal should win.
+
+This makes background structure detection the top remaining quality item: a blurred background
+carries no information worth colouring and should collapse to a handful of flat shapes, whereas a
+sharp cityscape behind a subject should not. Blur is directly measurable — the existing Laplacian
+variance measure, restricted to the background mask, distinguishes the two cases.
+
+## Current state
+
+27 conversions, ~3.0s each. Median 295 regions (was 155).
+
+| Variant | Colours | Regions | Unnumbered | Status |
+|---|---|---|---|---|
+| `simple` | 22-24 | 85-245 | 0-1.9% | shippable |
+| `standard` | 33-36 | 164-454 | 4.2-16.1% | usable |
+| `detailed` | 42-48 | 247-724 | 12.1-31.1% | blocked on leader lines |
