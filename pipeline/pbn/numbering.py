@@ -57,7 +57,7 @@ DIGIT_HEIGHT_PER_RADIUS = 0.95
 # under 1%, because the offending regions are thin in the *source photograph*: object edges,
 # outlines and gaps. They are not artefacts of merging and cannot be merged away.
 LEADER_DIRECTIONS = 16
-LEADER_MAX_LENGTH_FACTOR = 10.0  # multiples of the minimum digit height
+LEADER_MAX_LENGTH_FACTOR = 16.0  # multiples of the minimum digit height
 LEADER_STEP_FACTOR = 0.5  # search granularity, also in digit heights
 # Padding around a label box when reserving space, so adjacent numbers do not touch.
 LABEL_PADDING = 2.0

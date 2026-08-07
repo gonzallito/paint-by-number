@@ -28,9 +28,12 @@ OUTLINE_RGB = (88, 88, 96)
 CANVAS_RGB = (255, 255, 255)
 NUMBER_RGB = (70, 70, 78)
 SUBJECT_TINT_RGB = (255, 90, 80)
+FACE_OUTLINE_RGB = (40, 200, 120)
 # Leaders are drawn lighter than the region outlines so they read as annotation rather than
 # as a boundary the user might try to fill.
 LEADER_RGB = (150, 150, 158)
+# Dash period in pixels for leader lines.
+DASH_LENGTH = 3.0
 
 
 @lru_cache(maxsize=1)
@@ -49,6 +52,40 @@ def _font(size: int) -> ImageFont.ImageFont:
         # Pillow >= 10.1 can scale its bundled default font.
         return ImageFont.load_default(size=size)
     return ImageFont.truetype(path, size=size)
+
+
+def _dashed_line(
+    draw: ImageDraw.ImageDraw,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    colour: tuple[int, int, int],
+    dash: float = DASH_LENGTH,
+) -> None:
+    """Draw a dashed segment.
+
+    Leaders are dashed rather than solid because a solid 1px grey line is nearly
+    indistinguishable from a region outline, which is the one thing a leader must not be
+    confused with: the user would try to fill it. Dashing reads unambiguously as annotation.
+    """
+    x0, y0 = start
+    x1, y1 = end
+    length = float(np.hypot(x1 - x0, y1 - y0))
+    if length < 1.0:
+        return
+    steps = max(1, int(length / dash))
+    for step in range(steps):
+        if step % 2:
+            continue  # skip alternate segments to leave the gaps
+        t0 = step / steps
+        t1 = min(1.0, (step + 1) / steps)
+        draw.line(
+            [
+                (round(x0 + (x1 - x0) * t0), round(y0 + (y1 - y0) * t0)),
+                (round(x0 + (x1 - x0) * t1), round(y0 + (y1 - y0) * t1)),
+            ],
+            fill=colour,
+            width=1,
+        )
 
 
 def boundaries(labels: np.ndarray) -> np.ndarray:
@@ -91,7 +128,7 @@ def outline_canvas(
             continue
         anchor = tuple(int(v) for v in numbering.centres[region])
         target = tuple(int(v) for v in numbering.label_positions[region])
-        draw.line([anchor, target], fill=LEADER_RGB, width=1)
+        _dashed_line(draw, anchor, target, LEADER_RGB)
         # A dot marks which region the number belongs to; without it a leader pointing into a
         # cluster of slivers is ambiguous.
         draw.ellipse([anchor[0] - 1, anchor[1] - 1, anchor[0] + 1, anchor[1] + 1], fill=LEADER_RGB)
@@ -111,15 +148,28 @@ def outline_canvas(
     return np.asarray(image)
 
 
-def subject_overlay(img: np.ndarray, mask: np.ndarray | None, alpha: float = 0.45) -> np.ndarray:
-    """Original image with the detected subject tinted, for eyeballing segmentation."""
-    if mask is None:
-        return img.copy()
+def subject_overlay(
+    img: np.ndarray,
+    mask: np.ndarray | None,
+    alpha: float = 0.45,
+    face_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Original with the detected subject tinted and any faces outlined, for eyeballing.
+
+    Faces are outlined rather than tinted so both tiers stay legible where they overlap — the
+    face is always inside the subject.
+    """
     out = img.astype(np.float32)
-    tint = np.asarray(SUBJECT_TINT_RGB, dtype=np.float32)
-    selected = mask > 127
-    out[selected] = out[selected] * (1.0 - alpha) + tint * alpha
-    return np.clip(out, 0, 255).astype(np.uint8)
+    if mask is not None:
+        tint = np.asarray(SUBJECT_TINT_RGB, dtype=np.float32)
+        selected = mask > 127
+        out[selected] = out[selected] * (1.0 - alpha) + tint * alpha
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    if face_mask is not None and (face_mask > 127).any():
+        outline = skseg.find_boundaries(face_mask > 127, mode="outer")
+        out[outline] = FACE_OUTLINE_RGB
+    return out
 
 
 def palette_strip(

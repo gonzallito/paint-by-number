@@ -51,6 +51,99 @@ def texture_score(img: np.ndarray) -> float:
     return float(cv2.Laplacian(grey, cv2.CV_64F).var())
 
 
+def masked_texture(img: np.ndarray, mask: np.ndarray, erode_fraction: float = 0.02) -> float:
+    """Laplacian variance restricted to ``mask``, with the mask boundary excluded.
+
+    Erosion is essential rather than tidy. The silhouette is one of the strongest edges in the
+    image, so measuring right up to it would register a huge Laplacian response on *both*
+    sides and make even a heavily blurred background look sharp — exactly inverting the signal
+    we are trying to read.
+    """
+    selected = mask.astype(bool)
+    if not selected.any():
+        return 0.0
+
+    long_edge = max(img.shape[:2])
+    k = max(3, int(round(long_edge * erode_fraction)) | 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    core = cv2.erode(selected.astype(np.uint8), kernel).astype(bool)
+    # A thin region can erode away entirely; fall back to the uneroded mask rather than
+    # reporting zero texture, which would read as "perfectly blurred".
+    if not core.any():
+        core = selected
+
+    grey = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    laplacian = cv2.Laplacian(grey, cv2.CV_64F)
+    return float(laplacian[core].var())
+
+
+def background_blur_ratio(img: np.ndarray, subject_mask: np.ndarray | None) -> float | None:
+    """How much blurrier the background is than the subject. ``None`` without a subject.
+
+    Values near 1 mean both are equally sharp (a subject against a detailed scene). Large
+    values mean the background is out of focus — bokeh, which carries nothing worth colouring.
+
+    Deliberately a *ratio* rather than an absolute measure, so that a uniformly soft or
+    low-light photo is not mistaken for one with a deliberately defocused background.
+    """
+    if subject_mask is None:
+        return None
+    inside = subject_mask > 127
+    subject_texture = masked_texture(img, inside)
+    outside_texture = masked_texture(img, ~inside)
+    if outside_texture <= 1e-6:
+        return None if subject_texture <= 1e-6 else float("inf")
+    return float(subject_texture / outside_texture)
+
+
+# Background texture below this reads as "nothing worth colouring"; above the upper bound the
+# background has real structure that must survive. Interpolated on a log scale between.
+# Measured across the real corpus: bokeh backdrops land at 6-20, a moderately busy backdrop at
+# 104-144, and genuinely detailed scenes at 805-1191.
+BACKGROUND_TEXTURE_FLAT = 25.0
+BACKGROUND_TEXTURE_STRUCTURED = 400.0
+
+# A background this much blurrier than the subject is unambiguously defocused, whatever its
+# absolute texture, so it earns at least this much simplification.
+BACKGROUND_RATIO_STRONG = 3.0
+BACKGROUND_RATIO_FLOOR = 0.75
+
+# At full simplification the background's flatten strength is multiplied by 1 + this.
+BACKGROUND_SIMPLIFY_BOOST = 1.5
+
+
+def background_simplification(img: np.ndarray, subject_mask: np.ndarray | None) -> float:
+    """How aggressively to simplify the background, from 0 (leave alone) to 1 (collapse).
+
+    Driven primarily by the background's *absolute* texture rather than by its ratio to the
+    subject. The ratio alone under-reads the most common portrait failure: a person in flat
+    clothing against a defocused backdrop scores only ~2.4 because the flat subject shrinks the
+    numerator, even though the background is plainly bokeh. Absolute texture reads that case
+    correctly, and the ratio is kept as a booster for backgrounds that are moderately textured
+    yet clearly softer than a sharp subject.
+    """
+    if subject_mask is None:
+        return 0.0
+
+    outside = ~(subject_mask > 127)
+    if not outside.any():
+        return 0.0
+
+    texture = masked_texture(img, outside)
+    factor = float(
+        np.interp(
+            np.log10(max(texture, 1.0)),
+            (np.log10(BACKGROUND_TEXTURE_FLAT), np.log10(BACKGROUND_TEXTURE_STRUCTURED)),
+            (1.0, 0.0),
+        )
+    )
+
+    ratio = background_blur_ratio(img, subject_mask)
+    if ratio is not None and ratio >= BACKGROUND_RATIO_STRONG:
+        factor = max(factor, BACKGROUND_RATIO_FLOOR)
+    return float(np.clip(factor, 0.0, 1.0))
+
+
 def suggest_strength(img: np.ndarray) -> float:
     """Pick a flatten strength from the image's own texture.
 
@@ -133,6 +226,7 @@ def flatten_differential(
     subject_scale: float = 0.6,
     background_scale: float = 1.8,
     mode: FlattenMode = DEFAULT_MODE,
+    simplify_background: float = 0.0,
 ) -> np.ndarray:
     """Flatten background harder than subject, then composite along the silhouette.
 
@@ -148,8 +242,15 @@ def flatten_differential(
     The ``*_scale`` arguments multiply the texture-derived base strength rather than
     setting it absolutely, so a busy photo and a smooth one both get the same *relative*
     subject/background contrast.
+
+    ``simplify_background`` in 0..1 (see :func:`background_simplification`) escalates the
+    background further when it is defocused. A bokeh backdrop contains no structure worth
+    colouring, and left alone it fragments into long parallel bands that are faithful to the
+    photo and unpleasant to colour — the point at which faithfulness and appeal diverge, and
+    appeal should win.
     """
     base = suggest_strength(img)
+    background_scale = background_scale * (1.0 + simplify_background * BACKGROUND_SIMPLIFY_BOOST)
 
     if subject_mask is None:
         return flatten(img, strength=base * background_scale, mode=mode)

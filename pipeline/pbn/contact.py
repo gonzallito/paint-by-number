@@ -41,7 +41,7 @@ RULE = (222, 222, 226)
 HEADING = (40, 40, 46)
 BODY = (60, 60, 66)
 
-COLUMNS = ("original", "detected subject", "colourable page", "page at 1:1", "filled result")
+COLUMNS = ("original", "subject + faces", "colourable page", "page at 1:1", "filled result")
 
 
 @dataclass
@@ -90,6 +90,7 @@ def build_row(
     title: str,
     caption: str,
     from_subject: np.ndarray | None = None,
+    face_mask: np.ndarray | None = None,
 ) -> SheetRow:
     """Render every panel for one image/variant combination."""
     outline = render.outline_canvas(labels, numbering, region_colour)
@@ -108,7 +109,9 @@ def build_row(
 
     panels = [
         _fit_height(original, PANEL_HEIGHT),
-        _fit_height(render.subject_overlay(original, subject_mask), PANEL_HEIGHT),
+        _fit_height(
+            render.subject_overlay(original, subject_mask, face_mask=face_mask), PANEL_HEIGHT
+        ),
         _fit_height(outline, PANEL_HEIGHT),
         detail,
         _fit_height(filled, PANEL_HEIGHT),

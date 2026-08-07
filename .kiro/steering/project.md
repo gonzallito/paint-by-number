@@ -7,6 +7,22 @@ conversion quality.
 
 See `ROADMAP.md` for full phasing and estimates.
 
+## Three-tier region allocation
+
+Regions get one of three floors on effective radius, finest to coarsest: **face, subject,
+background**. Each tier exists because the tier above it was measured to be insufficient.
+
+* **Background coarser than subject** — cost discounting alone left backgrounds blotchy, because
+  a discount changes merge *order*, not where merging stops.
+* **Explicit per-side budget split** — size-based prioritisation only controlled count
+  indirectly. Since no region merges across the silhouette, the two sides are independent
+  sub-problems and each can simply be given a budget. Headroom transfers **one way only**:
+  unused background allowance may go to the subject, never the reverse.
+* **Face finer than subject** — subject-level allocation cannot rescue a person in flat
+  clothing, because the clothing has no colour structure to subdivide.
+* **Blurred backgrounds are detected and simplified further** — measured by *absolute*
+  background texture, not the subject/background ratio (see gotchas).
+
 ## Current status
 
 **Phase 0 — Feasibility spike, complete on the development set.** Pipeline runs end to end at
@@ -107,6 +123,24 @@ rembg 2.0.77.
   unpredictable vertical gaps and floated palette strips under the wrong columns.
 - **Never smoke-test on random noise** (see below) and never judge the colourable page from a
   scaled-down panel — the sheet includes a 1:1 crop for exactly that reason.
+
+- **Region count is ultimately bounded by label packing, not region geometry.** A small face
+  area has no room for hundreds of numbers however well shaped the regions are. Pushing the
+  floor lower eventually reintroduces unnumbered regions for this reason alone.
+- **Leader connectors must be dashed.** A solid 1px grey line is nearly indistinguishable from a
+  region outline, and confusing the two is the worst possible failure: the user tries to fill it.
+- **Erode both sides before measuring background blur.** The silhouette is a very strong edge, so
+  measuring up to it makes even heavy bokeh look sharp. Changes the measured ratio by up to 3.3x.
+- **Use absolute background texture, not the subject/background ratio.** The ratio under-reads
+  the commonest portrait case, because a flat-clothed subject shrinks the numerator.
+- **Cap background regions absolutely, not as a share of budget.** A share scales the wrong way —
+  a more detailed variant would hand the *background* more regions too.
+- **Face boxes must be drawn as ellipses.** A rectangle's corners fall outside the head and grant
+  fine-detail treatment to whatever is behind it.
+- **Two attempts to fix region shape both failed** and should not be re-litigated: boundary
+  smoothing (`pbn/smooth.py`, +2% radius) and a shape-aware merge cost (`CONTACT_EXPONENT`,
+  −0.2% unnumbered). The unnumberable regions are thin in the *source photograph*. Leader lines
+  are the answer. The contact term is kept only because it yields +18% regions for free.
 
 ### Toolchain gotchas
 

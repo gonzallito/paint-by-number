@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pbn import color, images, numbering, preprocess, quantize, segment, subject
+from pbn import color, faces, images, numbering, preprocess, quantize, segment, subject
 
 # Segmentation runs at this long edge regardless of the input size. Measured: raising it to
 # 2000 or 2800px does not increase region count (131 -> 129 -> 124 median) because the
@@ -22,6 +22,15 @@ from pbn import color, images, numbering, preprocess, quantize, segment, subject
 # eventual high-resolution artifact should come from upscaling the label map, not from
 # segmenting at full size.
 WORKING_LONG_EDGE = 1400
+
+# Subject budget share when the background is fully defocused. A bokeh backdrop needs only a
+# handful of shapes, so nearly the whole budget should go to the subject.
+MAX_SUBJECT_SHARE = 0.93
+
+# Absolute ceiling on background regions at full simplification. Expressed as a count rather
+# than a share because "how many shapes does an out-of-focus backdrop deserve" does not depend
+# on how detailed the user asked the subject to be.
+BACKGROUND_REGIONS_WHEN_FLAT = 45
 
 
 @dataclass(frozen=True)
@@ -57,8 +66,8 @@ class Variant:
 # Palette size buys colour *fidelity*, which is what "it does not look like the photo" means.
 VARIANTS: dict[str, Variant] = {
     "simple": Variant("simple", 24, 600, 0.60, "fewer, larger regions; every one numbered"),
-    "standard": Variant("standard", 36, 1200, 0.46, "balanced; closest to the photo per effort"),
-    "detailed": Variant("detailed", 48, 2400, 0.38, "most faithful; more small regions"),
+    "standard": Variant("standard", 36, 1200, 0.40, "balanced; closest to the photo per effort"),
+    "detailed": Variant("detailed", 48, 2400, 0.30, "most faithful; more small regions"),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
@@ -70,6 +79,7 @@ class Conversion:
     variant: Variant
     working: np.ndarray  # resized original, RGB uint8
     subject_mask: np.ndarray | None
+    face_mask: np.ndarray | None
     subject_coverage: float | None
     labels: np.ndarray
     region_colour: np.ndarray
@@ -81,6 +91,9 @@ class Conversion:
     n_colours: int
     texture: float
     flatten_strength: float
+    background_simplify: float
+    subject_budget_share: float
+    face_count: int
     merges_blocked: bool
     timings: dict[str, float] = field(default_factory=dict)
 
@@ -112,8 +125,12 @@ class Conversion:
             f"regions       {self.n_regions:,} of {self.initial_regions:,} initial\n"
             f"palette       {self.n_colours} colours (asked {self.variant.n_colours})\n"
             f"subject       {coverage} of frame -> {share_text} of regions\n"
-            f"unnumbered    {self.unlabelled_fraction:.1%}\n"
+            f"unnumbered    {self.unlabelled_fraction:.1%}"
+            f"   on leaders {self.numbering.leader_fraction:.1%}\n"
             f"texture       {self.texture:.0f} -> flatten {self.flatten_strength:.2f}\n"
+            f"faces         {self.face_count}\n"
+            f"bg simplify   {self.background_simplify:.2f}"
+            f" -> subject gets {self.subject_budget_share:.0%} of budget\n"
             f"time          {total:.1f}s"
             + ("\nWARNING       constraints unsatisfied" if self.merges_blocked else "")
         )
@@ -124,6 +141,8 @@ def convert(
     variant: Variant,
     subject_cache: str | Path | None = None,
     working_long_edge: int = WORKING_LONG_EDGE,
+    model_cache: str | Path = ".cache/models",
+    detect_faces: bool = True,
 ) -> Conversion:
     """Convert one image at one detail level."""
     timings: dict[str, float] = {}
@@ -138,15 +157,33 @@ def convert(
     mask = None if found is None else found.mask
 
     t = time.perf_counter()
+    detected_faces = faces.detect(working, cache_dir=model_cache) if detect_faces else None
+    timings["faces"] = time.perf_counter() - t
+    face_mask = detected_faces.mask if detected_faces is not None and detected_faces.found else None
+
+    t = time.perf_counter()
     texture = preprocess.texture_score(working)
     strength = preprocess.suggest_strength(working)
-    flat = preprocess.flatten_differential(working, mask)
+    simplify = preprocess.background_simplification(working, mask)
+    flat = preprocess.flatten_differential(working, mask, simplify_background=simplify)
     timings["flatten"] = time.perf_counter() - t
 
     t = time.perf_counter()
     quantised = quantize.quantize(flat, variant.n_colours, subject_mask=mask)
     lab = color.rgb_to_lab(flat)
     timings["quantize"] = time.perf_counter() - t
+
+    # A defocused background loses region budget as well as detail. Flattening alone is not
+    # enough: even a heavily flattened bokeh backdrop still has enough residual variation to
+    # absorb hundreds of regions if the budget allows it.
+    subject_share = float(
+        np.interp(simplify, (0.0, 1.0), (segment.DEFAULT_SUBJECT_BUDGET_SHARE, MAX_SUBJECT_SHARE))
+    )
+    background_cap = int(
+        round(
+            float(np.interp(simplify, (0.0, 1.0), (variant.budget, BACKGROUND_REGIONS_WHEN_FLAT)))
+        )
+    )
 
     t = time.perf_counter()
     seg = segment.segment(
@@ -157,6 +194,9 @@ def convert(
         budget=variant.budget,
         subject_mask=mask,
         min_radius_scale=variant.min_radius_scale,
+        subject_budget_share=subject_share,
+        background_region_cap=background_cap,
+        face_mask=face_mask,
     )
     timings["segment"] = time.perf_counter() - t
 
@@ -168,6 +208,7 @@ def convert(
         variant=variant,
         working=working,
         subject_mask=mask,
+        face_mask=face_mask,
         subject_coverage=None if found is None else found.coverage,
         labels=seg.labels,
         region_colour=seg.region_colour,
@@ -179,6 +220,9 @@ def convert(
         n_colours=quantised.n_colours,
         texture=texture,
         flatten_strength=strength,
+        background_simplify=simplify,
+        subject_budget_share=subject_share,
+        face_count=0 if detected_faces is None else detected_faces.count,
         merges_blocked=seg.merges_blocked,
         timings=timings,
     )
@@ -188,11 +232,14 @@ def convert_all(
     img: np.ndarray,
     variant_names: tuple[str, ...] = DEFAULT_VARIANTS,
     subject_cache: str | Path | None = None,
+    model_cache: str | Path = ".cache/models",
 ) -> list[Conversion]:
     """Convert one image at several detail levels, for the user to choose between."""
     results = []
     for name in variant_names:
         if name not in VARIANTS:
             raise ValueError(f"unknown variant {name!r}; expected one of {sorted(VARIANTS)}")
-        results.append(convert(img, VARIANTS[name], subject_cache=subject_cache))
+        results.append(
+            convert(img, VARIANTS[name], subject_cache=subject_cache, model_cache=model_cache)
+        )
     return results

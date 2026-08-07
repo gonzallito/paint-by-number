@@ -68,6 +68,11 @@ BACKGROUND_MIN_RADIUS_MULTIPLIER = 2.0
 # need an explicit cap rather than a discount.
 DEFAULT_SUBJECT_BUDGET_SHARE = 0.80
 
+# Faces get a *finer* floor than the rest of the subject — the third tier. Subject-level
+# allocation cannot help someone in flat clothing, because the clothing has no colour structure
+# to subdivide, whereas the face is both detailed and where the likeness lives.
+FACE_MIN_RADIUS_MULTIPLIER = 0.70
+
 # Shape term in the merge cost. Pairs with little shared border are penalised so that merging
 # builds compact regions rather than chains. The exponent controls how strongly shape competes
 # with colour; the epsilon keeps point-contact pairs finite rather than infinitely expensive.
@@ -241,12 +246,14 @@ class _Merger:
         radius_ref: float,
         min_radius: float,
         preserve_silhouette: bool,
+        is_face: np.ndarray | None = None,
     ) -> None:
         self.n = int(area.shape[0])
         self.area = area.astype(np.float64).copy()
         self.perimeter = perimeter.astype(np.float64).copy()
         self.sums = sums.astype(np.float64).copy()
         self.is_subject = is_subject.copy()
+        self.is_face = np.zeros(self.n, dtype=bool) if is_face is None else is_face.copy()
         # With no subject detected there is no foreground to protect, so the coarse
         # background floor must not apply — otherwise every region on a subject-less image
         # gets treated as background and the whole frame over-merges.
@@ -315,7 +322,9 @@ class _Merger:
         return True
 
     def _min_radius_for(self, i: int) -> float:
-        """Per-region floor: the background must be substantially coarser than the subject."""
+        """Per-region floor across three tiers: face finest, then subject, then background."""
+        if self.is_face[i]:
+            return self.min_radius * FACE_MIN_RADIUS_MULTIPLIER
         if self.is_subject[i] or not self.has_subject:
             return self.min_radius
         return self.min_radius * BACKGROUND_MIN_RADIUS_MULTIPLIER
@@ -338,6 +347,9 @@ class _Merger:
         self.area[a] += self.area[b]
         self.sums[a] += self.sums[b]
         self.is_subject[a] = bool(self.is_subject[a] or self.is_subject[b])
+        # Tier is inherited optimistically: a merged region containing any face pixels keeps
+        # the finest floor, so absorbing a neighbour cannot demote the face's protection.
+        self.is_face[a] = bool(self.is_face[a] or self.is_face[b])
         self.alive[b] = False
         self.parent[b] = a
         self.generation[a] += 1
@@ -476,6 +488,8 @@ def segment(
     preserve_silhouette: bool = True,
     min_radius_scale: float = DEFAULT_MIN_RADIUS_SCALE,
     subject_budget_share: float = DEFAULT_SUBJECT_BUDGET_SHARE,
+    background_region_cap: int | None = None,
+    face_mask: np.ndarray | None = None,
 ) -> Segmentation:
     """Extract regions from a quantised image and merge them.
 
@@ -502,6 +516,18 @@ def segment(
 
     # Always run the merge. Even when the initial count is already under the ceiling,
     # slivers still need absorbing.
+    if face_mask is None:
+        is_face = None
+    else:
+        # A region counts as face if a majority of its pixels fall inside the face mask, the
+        # same rule used for the subject.
+        flat = labels.ravel()
+        inside_face = np.bincount(
+            flat, weights=(face_mask > 127).ravel().astype(np.float64), minlength=initial
+        )
+        with np.errstate(invalid="ignore", divide="ignore"):
+            is_face = (inside_face / np.maximum(area, 1)) >= SUBJECT_PIXEL_MAJORITY
+
     pairs, shared, perimeter = _adjacency(labels, initial)
     merger = _Merger(
         pairs=pairs,
@@ -513,6 +539,7 @@ def segment(
         radius_ref=radius_ref,
         min_radius=min_radius,
         preserve_silhouette=preserve_silhouette,
+        is_face=is_face,
     )
     merger.absorb_undersized()
 
@@ -526,6 +553,13 @@ def segment(
         # while the out-of-focus background absorbed the rest as long wavy bands.
         subject_target = max(1, int(round(budget * subject_budget_share)))
         background_target = max(1, budget - subject_target)
+
+        # An absolute ceiling, when the caller knows the background deserves very few shapes.
+        # A share alone is not enough: 7% of a 1200 budget is still 84 regions, which is far
+        # more than a defocused backdrop should ever get, and it scales the wrong way — a more
+        # detailed variant would give the *background* more regions too.
+        if background_region_cap is not None:
+            background_target = max(1, min(background_target, background_region_cap))
 
         # Headroom transfers in one direction only. An unused *background* allowance may go
         # to the subject, but never the reverse: the background share is a hard ceiling, not

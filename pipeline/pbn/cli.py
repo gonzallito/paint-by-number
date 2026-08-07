@@ -137,6 +137,7 @@ def convert_command(
                     title=f"{path.stem}\n{conversion.variant.name}",
                     caption=conversion.caption(),
                     from_subject=conversion.from_subject,
+                    face_mask=conversion.face_mask,
                 )
             )
         contact.write_sheet(panels, out / f"{path.stem}.png")

@@ -43,3 +43,6 @@ Thumbs.db
 # between tool invocations in the sandbox)
 pipeline/scratch/
 pipeline/.cache/
+
+# Face detector model (downloaded on demand)
+pipeline/.cache/models/

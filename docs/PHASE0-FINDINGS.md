@@ -360,3 +360,126 @@ variance measure, restricted to the background mask, distinguishes the two cases
 | `simple` | 22-24 | 85-245 | 0-1.9% | shippable |
 | `standard` | 33-36 | 164-454 | 4.2-16.1% | usable |
 | `detailed` | 42-48 | 247-724 | 12.1-31.1% | blocked on leader lines |
+
+
+---
+
+# Addendum 3: leader lines, background simplification, face tier
+
+Three agreed quality items, all implemented and measured on the real corpus. All three variants
+retained (24 / 36 / 48) so the user chooses rather than being chosen for.
+
+## 1. Leader lines — the `detailed` variant is unblocked
+
+Regions with no interior room now have their number drawn outside and joined by a dashed
+connector, as commercial kits do.
+
+**Unnumbered went from 12.1-31.1% to 0.0% on every image.**
+
+Implementation notes worth keeping:
+
+* Placement is two passes. Interior placement runs first, **largest area first**, reserving
+  space in an occupancy mask; leaders then search outward over 16 directions at increasing
+  distance for a free slot. Ordering matters because pass 1 constrains pass 2.
+* Leaders always use the *minimum* digit height. They are a fallback, and a compact label is
+  far more likely to find space.
+* Each successive region offsets its angular search by the golden angle, so clusters of
+  leaders fan out instead of all pointing the same way.
+* Where no slot exists at all, the region is left unlabelled rather than overlapping another
+  number — an absent number is better than an ambiguous one.
+* **Connectors are dashed, not solid.** A solid 1px grey line is nearly indistinguishable from
+  a region outline, which is the one thing it must not be confused with: the user would try to
+  fill it.
+
+### Leaders make the radius floor much cheaper
+
+This is the compounding benefit. Before leaders, lowering the floor produced regions that could
+not be numbered, so the floor had to stay high. Now the cost of a lower floor is leader clutter
+rather than missing numbers:
+
+| radius floor | median regions | on leaders | unnumbered |
+|---|---|---|---|
+| 0.38 | 458 | 19% | 0.0% |
+| **0.30** | **603** | 33% | 0.0% |
+| 0.24 | 820 | 47% | 0.3% |
+| 0.18 | 1,112 | 61% | 2.5% |
+
+Floors lowered accordingly: `standard` 0.46 → 0.40, `detailed` 0.38 → 0.30.
+
+## 2. Blurred backgrounds are detected and simplified
+
+`background_simplification()` returns 0..1. Two lessons from building it:
+
+**Erosion is mandatory.** The silhouette is one of the strongest edges in the image, so
+measuring texture right up to it registers a huge Laplacian response on both sides and makes a
+heavily blurred background look sharp — inverting the signal. On one image, eroding changes the
+measured ratio by 3.3x.
+
+**A ratio alone is the wrong signal.** Subject-to-background texture ratio under-reads the most
+common portrait case: a man in flat clothing against a defocused backdrop scores only 2.4,
+because the flat subject shrinks the numerator even though the background is plainly bokeh.
+**Absolute** background texture reads it correctly, so that is the primary signal, with the
+ratio kept as a booster.
+
+Measured on the corpus — bokeh backdrops land at 6-20, moderately busy at 104-144, genuinely
+detailed scenes at 805-1191. Sharp backgrounds correctly score 0.00 and are left untouched.
+
+A defocused background loses both detail (flatten boost) and region budget (share plus an
+absolute cap). The cap has to be **absolute**, not a share: 7% of a 1200 budget is still 84
+regions, far more than a backdrop deserves, and it scales the wrong way — a more detailed
+variant would give the *background* more regions too.
+
+### Calibrating the cap was a genuine trade, and the first attempt overshot
+
+At a cap of 22 the background became 2-3 enormous shapes, total regions fell by over half, and
+the result departed sharply from the photo — the wrong trade given that fidelity was the stated
+priority and noise the secondary complaint. Isolating the two levers showed the **flatten boost
+was doing most of the useful work** (subject share 21% → 59% with no cap at all), and the cap
+only traded further. Settled at 45.
+
+## 3. Face tier: three levels instead of two
+
+Faces get a *finer* radius floor than the rest of the subject, via OpenCV's YuNet (~230KB, versus
+176MB for the subject segmenter). Haar cascades were the obvious alternative but
+`opencv-python-headless` ships no cascade XML files at all.
+
+This addresses the wall found earlier: subject-level allocation cannot rescue a person in flat
+clothing, because the clothing has no colour structure to subdivide, whereas the face is both
+detailed and where the likeness lives.
+
+**Face region density rose 1.44-2.67x.** On the motivating portrait, face regions went from 87 to
+194 and total regions from 203 to 313. Faces detected on 7 of 9 images; correctly absent on the
+landscape.
+
+Boxes are expanded 1.35x and drawn as an **ellipse**, not a rectangle — a rectangle's corners fall
+outside the head and would grant fine-detail treatment to whatever sits behind it.
+
+### Label packing is a hard ceiling on region count
+
+The face tier initially reintroduced unnumbered regions (up to 8.7%), and the cause is worth
+recording: in a small face area there is simply not room for hundreds of numbers, however well
+shaped the regions are. **Region count is ultimately bounded by label packing, independently of
+region geometry.** Resolved by a coarser face floor (0.70) plus a longer leader reach (16x),
+giving 0.0% mean / 0.1% worst.
+
+## Current state
+
+27 conversions, ~3.0s each. Median 356 regions (85 min, 1,100 max), unnumbered 0.0% mean /
+0.1% max.
+
+| Variant | Colours | Regions | On leaders |
+|---|---|---|---|
+| `simple` | 22-24 | 85-247 | 0-8% |
+| `standard` | 33-36 | 198-544 | 10-33% |
+| `detailed` | 42-48 | 336-1,100 | 25-61% |
+
+## Open question for review
+
+**`detailed` puts up to 61% of numbers on leaders.** Every region is numbered and the dashed
+connectors are distinguishable from outlines, but a majority of numbers sitting outside their
+region is a legibility question that measurement cannot settle — it needs a human judgement on
+whether the page still feels pleasant to work through. The 1:1 crop panel is the view to judge
+it from, since that is roughly what the app shows at working zoom.
+
+If it reads as too busy, the lever is the `detailed` radius floor: 0.38 gives 19% leaders instead
+of 61%, at roughly 30% fewer regions.
