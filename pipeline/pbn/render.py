@@ -28,6 +28,9 @@ OUTLINE_RGB = (88, 88, 96)
 CANVAS_RGB = (255, 255, 255)
 NUMBER_RGB = (70, 70, 78)
 SUBJECT_TINT_RGB = (255, 90, 80)
+# Leaders are drawn lighter than the region outlines so they read as annotation rather than
+# as a boundary the user might try to fill.
+LEADER_RGB = (150, 150, 158)
 
 
 @lru_cache(maxsize=1)
@@ -80,18 +83,30 @@ def outline_canvas(
 
     image = Image.fromarray(canvas)
     draw = ImageDraw.Draw(image)
-    fits = numbering.fits
-    for region in np.flatnonzero(fits):
+    labelled = np.flatnonzero(numbering.fits)
+
+    # Draw every connector first, so no leader crosses over a number.
+    for region in labelled:
+        if not numbering.has_leader[region]:
+            continue
+        anchor = tuple(int(v) for v in numbering.centres[region])
+        target = tuple(int(v) for v in numbering.label_positions[region])
+        draw.line([anchor, target], fill=LEADER_RGB, width=1)
+        # A dot marks which region the number belongs to; without it a leader pointing into a
+        # cluster of slivers is ambiguous.
+        draw.ellipse([anchor[0] - 1, anchor[1] - 1, anchor[0] + 1, anchor[1] + 1], fill=LEADER_RGB)
+
+    for region in labelled:
         height = float(numbering.digit_heights[region])
         # Round the requested size so the font cache actually hits.
         size = max(6, int(round(height)))
-        x, y = (int(v) for v in numbering.centres[region])
+        x, y = (int(v) for v in numbering.label_positions[region])
         draw.text(
             (x, y),
             str(int(region_colour[region]) + 1),
             font=_font(size),
             fill=NUMBER_RGB,
-            anchor="mm",  # centre the glyph box on the interior point
+            anchor="mm",  # centre the glyph box on the label position
         )
     return np.asarray(image)
 

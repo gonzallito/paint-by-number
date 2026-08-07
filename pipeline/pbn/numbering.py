@@ -50,24 +50,60 @@ REFERENCE_LONG_EDGE = 1400.0
 DIGIT_HEIGHT_PER_RADIUS = 0.95
 
 
+# Leader lines: when a region has no interior room, its number is drawn outside and joined
+# back by a thin line. This is what commercial paint-by-number kits do, and it is the only
+# thing that works here — two independent attempts to make regions rounder (boundary
+# smoothing, and a shape term in the merge cost) each moved the unnumberable fraction by
+# under 1%, because the offending regions are thin in the *source photograph*: object edges,
+# outlines and gaps. They are not artefacts of merging and cannot be merged away.
+LEADER_DIRECTIONS = 16
+LEADER_MAX_LENGTH_FACTOR = 10.0  # multiples of the minimum digit height
+LEADER_STEP_FACTOR = 0.5  # search granularity, also in digit heights
+# Padding around a label box when reserving space, so adjacent numbers do not touch.
+LABEL_PADDING = 2.0
+# Successive regions start their angular search offset by the golden angle, so that clusters
+# of leaders fan out instead of all pointing the same direction.
+GOLDEN_ANGLE = 2.399963
+
+
 @dataclass
 class Numbering:
     """Number placement for every region."""
 
     centres: np.ndarray  # (N, 2) int32, (x, y) of the most interior pixel
     radii: np.ndarray  # (N,) float32, inscribed radius in pixels
-    digit_heights: np.ndarray  # (N,) float32, height to draw at (0 where it will not fit)
+    digit_heights: np.ndarray  # (N,) float32, height to draw at (0 = no label at all)
+    label_positions: np.ndarray  # (N, 2) int32, where the digit is actually drawn
+    has_leader: np.ndarray  # (N,) bool, label sits outside and needs a connector line
 
     @property
     def fits(self) -> np.ndarray:
-        """Boolean mask of regions whose number can actually be drawn."""
+        """Boolean mask of regions that carry a number, whether inside or via a leader."""
         return self.digit_heights > 0
+
+    @property
+    def inside(self) -> np.ndarray:
+        """Regions whose number sits within their own boundary."""
+        return self.fits & ~self.has_leader
 
     @property
     def unlabelled_fraction(self) -> float:
         if self.digit_heights.size == 0:
             return 0.0
         return float(1.0 - self.fits.mean())
+
+    @property
+    def leader_fraction(self) -> float:
+        if self.digit_heights.size == 0:
+            return 0.0
+        return float(self.has_leader.mean())
+
+    def leader_lengths(self) -> np.ndarray:
+        """Distance from anchor to label for each leadered region."""
+        if not self.has_leader.any():
+            return np.zeros(0, dtype=np.float32)
+        delta = self.label_positions[self.has_leader] - self.centres[self.has_leader]
+        return np.hypot(delta[:, 0], delta[:, 1]).astype(np.float32)
 
 
 def text_half_diagonal(digits: int, height: float) -> float:
@@ -123,14 +159,50 @@ def place(
     if max_digit_height is None:
         max_digit_height = default_max
 
+    height_map, width_map = labels.shape
     centres = np.zeros((n_regions, 2), dtype=np.int32)
     radii = np.zeros(n_regions, dtype=np.float32)
     heights = np.zeros(n_regions, dtype=np.float32)
+    label_positions = np.zeros((n_regions, 2), dtype=np.int32)
+    has_leader = np.zeros(n_regions, dtype=bool)
+
+    # Reserved space, so labels never overlap one another.
+    occupancy = np.zeros(labels.shape, dtype=bool)
+
+    def label_box(x: float, y: float, digits: int, text_height: float) -> tuple[int, int, int, int]:
+        half_w = digits * DIGIT_ASPECT * text_height / 2.0 + LABEL_PADDING
+        half_h = text_height / 2.0 + LABEL_PADDING
+        return (
+            int(round(x - half_w)),
+            int(round(y - half_h)),
+            int(round(x + half_w)),
+            int(round(y + half_h)),
+        )
+
+    def reserve(box: tuple[int, int, int, int]) -> None:
+        x0, y0, x1, y1 = box
+        occupancy[max(0, y0) : y1 + 1, max(0, x0) : x1 + 1] = True
+
+    def is_free(box: tuple[int, int, int, int]) -> bool:
+        x0, y0, x1, y1 = box
+        if x0 < 0 or y0 < 0 or x1 >= width_map or y1 >= height_map:
+            return False
+        return not occupancy[y0 : y1 + 1, x0 : x1 + 1].any()
 
     # find_objects is 1-indexed and returns None for absent labels.
     boxes = ndi.find_objects(labels + 1)
+    digits_for = [len(str(int(region_colour[r]) + 1)) for r in range(n_regions)]
 
-    for region in range(n_regions):
+    # --- Pass 1: interior placement, largest regions first ------------------------------
+    # Ordering by area matters because pass 1 reserves space that pass 2 must work around;
+    # letting the most prominent regions claim their natural position first keeps the common
+    # case clean.
+    areas = np.bincount(labels.ravel(), minlength=n_regions)
+    order = np.argsort(-areas, kind="stable")
+
+    needs_leader: list[int] = []
+    for region in order:
+        region = int(region)
         if region >= len(boxes) or boxes[region] is None:
             continue
         box = boxes[region]
@@ -139,11 +211,11 @@ def place(
             continue
 
         local_x, local_y, radius = _interior_point(crop)
-        centres[region] = (box[1].start + local_x, box[0].start + local_y)
+        anchor_x = box[1].start + local_x
+        anchor_y = box[0].start + local_y
+        centres[region] = (anchor_x, anchor_y)
         radii[region] = radius
-
-        # Numbers are 1-based for the user; palette index 0 is displayed as "1".
-        digits = len(str(int(region_colour[region]) + 1))
+        digits = digits_for[region]
 
         # Scale the digit to the room available, then verify it actually fits. A region can
         # have ample area yet no interior room if it is long and thin, which is precisely
@@ -152,10 +224,59 @@ def place(
             np.clip(radius * DIGIT_HEIGHT_PER_RADIUS, min_digit_height, max_digit_height)
         )
         if radius >= required_radius(digits, desired):
-            heights[region] = desired
+            text_height = desired
         elif radius >= required_radius(digits, min_digit_height):
-            heights[region] = min_digit_height
+            text_height = min_digit_height
         else:
-            heights[region] = 0.0  # no legible number possible
+            needs_leader.append(region)
+            continue
 
-    return Numbering(centres=centres, radii=radii, digit_heights=heights)
+        heights[region] = text_height
+        label_positions[region] = (anchor_x, anchor_y)
+        reserve(label_box(anchor_x, anchor_y, digits, text_height))
+
+    # --- Pass 2: leader lines for everything that did not fit ---------------------------
+    # Leaders always use the minimum digit height: they are a fallback, and a compact label
+    # is far more likely to find free space.
+    step = max(1.0, min_digit_height * LEADER_STEP_FACTOR)
+    max_length = min_digit_height * LEADER_MAX_LENGTH_FACTOR
+    angles = np.arange(LEADER_DIRECTIONS) * (2.0 * np.pi / LEADER_DIRECTIONS)
+
+    # Largest first again, so the more visible small regions get the shortest leaders.
+    for rank, region in enumerate(sorted(needs_leader, key=lambda r: -areas[r])):
+        digits = digits_for[region]
+        anchor_x, anchor_y = (int(v) for v in centres[region])
+        # Start just clear of the region itself, otherwise the label lands on top of the
+        # sliver it is meant to point at.
+        start = max(radii[region] + min_digit_height * 0.6, step)
+        offset = rank * GOLDEN_ANGLE
+
+        placed = False
+        distance = start
+        while distance <= max_length and not placed:
+            for angle in angles + offset:
+                candidate_x = anchor_x + distance * float(np.cos(angle))
+                candidate_y = anchor_y + distance * float(np.sin(angle))
+                candidate = label_box(candidate_x, candidate_y, digits, min_digit_height)
+                if is_free(candidate):
+                    heights[region] = min_digit_height
+                    label_positions[region] = (int(round(candidate_x)), int(round(candidate_y)))
+                    has_leader[region] = True
+                    reserve(candidate)
+                    placed = True
+                    break
+            distance += step
+
+        if not placed:
+            # Genuinely nowhere to put it; leave unlabelled rather than overlap another
+            # number, which would be worse than an absent one.
+            heights[region] = 0.0
+            label_positions[region] = (anchor_x, anchor_y)
+
+    return Numbering(
+        centres=centres,
+        radii=radii,
+        digit_heights=heights,
+        label_positions=label_positions,
+        has_leader=has_leader,
+    )

@@ -58,9 +58,7 @@ class Variant:
 VARIANTS: dict[str, Variant] = {
     "simple": Variant("simple", 24, 600, 0.60, "fewer, larger regions; every one numbered"),
     "standard": Variant("standard", 36, 1200, 0.46, "balanced; closest to the photo per effort"),
-    "detailed": Variant(
-        "detailed", 48, 2400, 0.38, "most faithful; small regions need leader lines"
-    ),
+    "detailed": Variant("detailed", 48, 2400, 0.38, "most faithful; more small regions"),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
