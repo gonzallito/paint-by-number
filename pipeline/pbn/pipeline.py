@@ -16,13 +16,39 @@ import numpy as np
 
 from pbn import color, faces, images, numbering, preprocess, quantize, segment, subject
 
-# Canvas size for segmentation. Raised from 1400 once the radius floor became absolute rather
-# than canvas-relative (see pbn/segment.py): with an absolute floor, a larger canvas genuinely
-# yields more regions and therefore more usable palette entries, whereas before it did not.
+# --- Adaptive sizing -----------------------------------------------------------------------
 #
-# The gain only materialises for high-resolution sources — a 0.8MP web image has no further
-# detail to resolve and is never upscaled. Region count is ultimately bounded by the source photo.
-WORKING_LONG_EDGE = 1400
+# Canvas size follows the source. A camera-roll photo (12-48MP on any recent phone) supports a
+# large canvas with many regions and a deep palette; a saved web image or screenshot does not, and
+# cannot be upscaled into detail it never had.
+#
+# Region count is then derived from canvas *area* rather than chosen by hand, so both input classes
+# get regions of the same comfortable size and simply differ in how many there are. This is what
+# makes one set of settings work for both.
+MAX_WORKING_LONG_EDGE = 2400
+MIN_WORKING_LONG_EDGE = 900
+
+# Target area per region, in canvas pixels — the painting grain. ~3,200px is roughly 57x57,
+# comfortable to tap and fill.
+#
+# 6,400px was tried first and was too coarse: it drove ordinary web-sized images down to ~120
+# regions, which both lost fidelity and collapsed all three variants into the same output because
+# every one of them hit TARGET_REGIONS_MIN.
+TARGET_REGION_AREA_PX = 3200.0
+TARGET_REGIONS_MIN = 100
+TARGET_REGIONS_MAX = 1600
+
+# Palette size is capped by region count (measured correlation 0.849, roughly one usable colour per
+# 2-4 regions), so requesting more colours than the regions can host just returns fewer. Requests
+# are clamped to what is actually hostable, which keeps the palette honest and avoids paying for
+# k-means clusters that get pruned immediately afterwards.
+COLOURS_PER_REGION_CEILING = 0.40
+
+# Bounds for the adaptive floor search.
+FLOOR_SEARCH_LOW = 0.18
+FLOOR_SEARCH_HIGH = 1.30
+FLOOR_SEARCH_STEPS = 4
+
 
 # Subject budget share when the background is fully defocused. A bokeh backdrop needs only a
 # handful of shapes, so nearly the whole budget should go to the subject.
@@ -36,12 +62,18 @@ BACKGROUND_REGIONS_WHEN_FLAT = 120
 
 @dataclass(frozen=True)
 class Variant:
-    """A detail level offered to the user."""
+    """A detail level offered to the user.
+
+    ``region_area_scale`` multiplies the target area per region, so it sets the painting *grain*.
+    Note that no variant goes below 1.0: the reviewer's comfortable grain is the finest offered, and
+    richer variants add colour depth rather than smaller regions. Buying detail by shrinking regions
+    is what produced cells too small to paint.
+    """
 
     name: str
     n_colours: int
-    budget: int
-    min_radius_scale: float
+    region_area_scale: float
+    canvas_cap: int
     description: str
 
 
@@ -77,10 +109,22 @@ class Variant:
 #   regions      205 -> 310   (+50% at the SAME region size, from extra colour boundaries)
 # plus markedly less visible banding in gradients, which mean error averages away and which is
 # most of what "looks like the photo" means perceptually.
+# Variants differ by **canvas size**, i.e. how many comfortable-sized regions the artwork has, and
+# therefore how long it takes. Grain is identical across all three.
+#
+# This replaced two earlier models, both measured and both wrong:
+#
+# 1. Varying region *size* — produced cells too small to paint comfortably.
+# 2. Varying palette *depth* — measured to buy almost nothing. Isolating colour from region count
+#    (89 -> 128 colours at near-constant regions) changed reconstruction error by 0 to -2.5%, and on
+#    two images made it *worse*. Doubling region count changed it by -7% to -19%.
+#
+# Colour saturates early; region count is the real lever. Palettes are capped at 96 accordingly —
+# beyond that the palette tray gets harder to use for no visible gain.
 VARIANTS: dict[str, Variant] = {
-    "simple": Variant("simple", 48, 1500, 0.75, "larger regions, quicker to finish"),
-    "standard": Variant("standard", 96, 3000, 0.60, "comfortable regions, rich colour"),
-    "detailed": Variant("detailed", 150, 4000, 0.60, "same region size, deepest colour"),
+    "simple": Variant("simple", 48, 1.0, 1400, "shorter artwork"),
+    "standard": Variant("standard", 72, 1.0, 1900, "medium artwork"),
+    "detailed": Variant("detailed", 96, 1.0, 2400, "longest artwork, most regions"),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
@@ -104,6 +148,9 @@ class Conversion:
     n_colours: int
     texture: float
     flatten_strength: float
+    target_regions: int
+    radius_floor: float
+    requested_colours: int
     background_simplify: float
     subject_budget_share: float
     face_count: int
@@ -135,8 +182,12 @@ class Conversion:
         total = sum(self.timings.values())
         return (
             f"variant       {self.variant.name} ({self.variant.description})\n"
-            f"regions       {self.n_regions:,} of {self.initial_regions:,} initial\n"
-            f"palette       {self.n_colours} colours (asked {self.variant.n_colours})\n"
+            f"regions       {self.n_regions:,} (target {self.target_regions:,}) "
+            f"of {self.initial_regions:,} initial\n"
+            f"canvas        {self.working.shape[1]}x{self.working.shape[0]}"
+            f"   floor {self.radius_floor:.2f}\n"
+            f"palette       {self.n_colours} colours"
+            f" (asked {self.requested_colours} of {self.variant.n_colours} offered)\n"
             f"subject       {coverage} of frame -> {share_text} of regions\n"
             f"numbers       {self.numbering.visible_fraction(1.0):.0%} shown at fit-to-screen,"
             f" {self.numbering.visible_fraction(2.0):.0%} at 2x\n"
@@ -151,11 +202,73 @@ class Conversion:
         )
 
 
+def canvas_long_edge(img: np.ndarray, variant: Variant | None = None) -> int:
+    """Canvas size for this source and variant. Never upscales — absent detail cannot be invented.
+
+    The variant's ``canvas_cap`` is what makes one artwork longer than another: at a fixed
+    comfortable grain, more canvas means more regions. A low-resolution source cannot reach the
+    larger caps, so its variants converge — which is honest, since a 0.4MP image genuinely supports
+    only one rendition.
+    """
+    cap = (
+        MAX_WORKING_LONG_EDGE if variant is None else min(MAX_WORKING_LONG_EDGE, variant.canvas_cap)
+    )
+    return int(np.clip(max(img.shape[:2]), MIN_WORKING_LONG_EDGE, cap))
+
+
+def target_region_count(canvas_shape: tuple[int, int], variant: Variant) -> int:
+    """Region count implied by canvas area at this variant's grain."""
+    height, width = canvas_shape[:2]
+    area_per_region = TARGET_REGION_AREA_PX * variant.region_area_scale
+    return int(
+        np.clip(round(height * width / area_per_region), TARGET_REGIONS_MIN, TARGET_REGIONS_MAX)
+    )
+
+
+def _segment_to_target(
+    quantised,
+    lab: np.ndarray,
+    mask: np.ndarray | None,
+    target: int,
+    subject_share: float,
+    background_cap: int,
+):
+    """Find the radius floor that lands closest to ``target`` regions, by bisection.
+
+    Region count falls monotonically as the floor rises, so bisection converges quickly. Searching
+    for the *count* rather than fixing the floor is what makes one configuration work for both a
+    48MP camera-roll photo and a 0.4MP screenshot: each gets regions of the same comfortable size,
+    and simply differs in how many there are.
+    """
+    low, high = FLOOR_SEARCH_LOW, FLOOR_SEARCH_HIGH
+    best = None
+    for _ in range(FLOOR_SEARCH_STEPS):
+        middle = (low + high) / 2.0
+        candidate = segment.segment(
+            quantised.labels,
+            quantised.n_colours,
+            lab,
+            quantised.palette_lab,
+            budget=TARGET_REGIONS_MAX * 3,
+            subject_mask=mask,
+            min_radius_scale=middle,
+            subject_budget_share=subject_share,
+            background_region_cap=background_cap,
+        )
+        if best is None or abs(candidate.n_regions - target) < abs(best[1].n_regions - target):
+            best = (middle, candidate)
+        if candidate.n_regions > target:
+            low = middle  # too many regions: raise the floor
+        else:
+            high = middle  # too few: lower it
+    return best
+
+
 def convert(
     img: np.ndarray,
     variant: Variant,
     subject_cache: str | Path | None = None,
-    working_long_edge: int = WORKING_LONG_EDGE,
+    working_long_edge: int | None = None,
     model_cache: str | Path = ".cache/models",
     detect_faces: bool = True,
 ) -> Conversion:
@@ -163,7 +276,10 @@ def convert(
     timings: dict[str, float] = {}
 
     t = time.perf_counter()
-    working = images.fit_long_edge(img, working_long_edge)
+    working = images.fit_long_edge(
+        img,
+        working_long_edge if working_long_edge is not None else canvas_long_edge(img, variant),
+    )
     timings["resize"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -183,8 +299,15 @@ def convert(
     flat = preprocess.flatten_differential(working, mask, simplify_background=simplify)
     timings["flatten"] = time.perf_counter() - t
 
+    target = target_region_count(working.shape[:2], variant)
+    # Requesting more colours than the regions can host just returns fewer after pruning, so the
+    # request is clamped to what is hostable. Keeps the palette honest and avoids computing k-means
+    # clusters that are discarded immediately.
+    hostable = max(quantize.MIN_COLOURS, int(round(target * COLOURS_PER_REGION_CEILING)))
+    requested_colours = min(variant.n_colours, hostable)
+
     t = time.perf_counter()
-    quantised = quantize.quantize(flat, variant.n_colours, subject_mask=mask)
+    quantised = quantize.quantize(flat, requested_colours, subject_mask=mask)
     lab = color.rgb_to_lab(flat)
     timings["quantize"] = time.perf_counter() - t
 
@@ -196,22 +319,16 @@ def convert(
     )
     background_cap = int(
         round(
-            float(np.interp(simplify, (0.0, 1.0), (variant.budget, BACKGROUND_REGIONS_WHEN_FLAT)))
+            float(
+                np.interp(
+                    simplify, (0.0, 1.0), (TARGET_REGIONS_MAX * 3, BACKGROUND_REGIONS_WHEN_FLAT)
+                )
+            )
         )
     )
 
     t = time.perf_counter()
-    seg = segment.segment(
-        quantised.labels,
-        quantised.n_colours,
-        lab,
-        quantised.palette_lab,
-        budget=variant.budget,
-        subject_mask=mask,
-        min_radius_scale=variant.min_radius_scale,
-        subject_budget_share=subject_share,
-        background_region_cap=background_cap,
-    )
+    floor, seg = _segment_to_target(quantised, lab, mask, target, subject_share, background_cap)
     timings["segment"] = time.perf_counter() - t
 
     # Drop palette entries that no surviving region uses. Must happen before numbering, because
@@ -240,6 +357,9 @@ def convert(
         n_colours=int(palette_rgb.shape[0]),
         texture=texture,
         flatten_strength=strength,
+        target_regions=target,
+        radius_floor=floor,
+        requested_colours=requested_colours,
         background_simplify=simplify,
         subject_budget_share=subject_share,
         face_count=0 if detected_faces is None else detected_faces.count,

@@ -142,7 +142,7 @@ def write_sheet(rows: list[SheetRow], path: str | Path) -> Path:
     panel_widths = [p.shape[1] for p in rows[0].panels]
     strip_width = sum(panel_widths) + GAP * (len(panel_widths) - 1)
     total_width = MARGIN * 2 + LABEL_WIDTH + strip_width + GAP + CAPTION_WIDTH
-    row_height = PANEL_HEIGHT + GAP + PALETTE_HEIGHT
+    row_height = PANEL_HEIGHT + GAP + max(PALETTE_HEIGHT, rows[0].palette.shape[0])
     total_height = MARGIN * 2 + HEADER_HEIGHT + len(rows) * (row_height + GAP * 2)
 
     canvas = Image.new("RGB", (total_width, total_height), BACKGROUND)

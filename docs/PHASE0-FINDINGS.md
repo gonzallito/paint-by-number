@@ -587,3 +587,83 @@ high-resolution source photos. Of the current corpus only the two 17.9MP images 
 web-sized ones top out around 70-90 colours whatever is requested. The choice is whether to target
 large, high-resolution artworks (long sessions, deep palettes, heavy panning) or accept that
 ordinary phone-sized uploads produce 200-400 region canvases with 70-130 colours.
+
+
+---
+
+# Addendum 5: adaptive sizing, and colour saturates far earlier than expected
+
+## Input classes were misjudged
+
+A phone gallery upload is **not** a small image. Recent phones shoot 12-48MP, which is at or above
+the 17.9MP DSLR files in the corpus. The real distinction is:
+
+* **Camera-roll uploads (12-48MP)** — the common case for a phone app, firmly high-resolution.
+* **Saved images, screenshots, memes (0.4-3MP)** — also real, a different class entirely.
+
+The dev corpus is 7 web-class images to 2 camera-roll, so **every calibration to this point was
+tuned against the wrong input distribution.**
+
+## Adaptive sizing
+
+Canvas size now follows the source (never upscaling), and region count is derived from canvas
+*area* at a fixed comfortable grain (~3,200px per region), rather than from a hand-picked floor. The
+floor is found per image by bisection on the target count. One configuration therefore serves both
+input classes: regions come out the same comfortable size, and only their number differs.
+
+Palette requests are clamped to what the regions can host (~0.4 colours per region), since asking
+for more just returns fewer after pruning.
+
+## The measurement that overturned the premise
+
+Isolating colour from region count — comparing variants where region count is near-constant but
+palette rises substantially:
+
+| image | colours | regions | filled-result error |
+|---|---|---|---|
+| CIES | 93 → 139 | 858 → 980 | **0%** |
+| king | 89 → 128 | 499 → 554 | −2.5% |
+| praga | 80 → 114 | 986 → 1088 | −1% |
+| anime | 45 → 42 | 144 → 146 | **+2% (worse)** |
+| juve | 37 → 38 | 128 → 122 | **+4% (worse)** |
+
+Against that, doubling *region count* moved error by **−7% to −19%**.
+
+**Colour saturates at roughly 80 entries. Region count is the dominant lever.** The reviewer's
+earlier preference for the most detailed variant was real but misattributed: at the time that
+variant had both more colours *and* more regions, and the two were never separated. Acting on the
+colour hypothesis without isolating it was a mistake.
+
+Every region is flooded with one flat colour, so error has two sources — palette quantisation and
+within-region variation. Past ~80 colours the second dominates completely, and no palette can fix
+it.
+
+Variants were restructured accordingly: identical grain, palettes capped at 96, and detail
+expressed as **canvas size** (more comfortable-sized regions, therefore a longer artwork).
+
+## Consequences worth knowing
+
+**Variants converge for low-resolution sources.** A 0.4MP image cannot reach the larger canvas caps,
+so all three renditions come out nearly identical — honest, since such an image genuinely supports
+one rendition, but it means the variant picker is only meaningful for camera-roll uploads. The app
+should probably offer fewer options for small inputs rather than three identical ones.
+
+**The palette tray does not scale linearly.** At 89 and 128 entries the contact-sheet strip became an
+illegible smear; it now wraps at 48 per row. The same limit applies to the app: a linear tray cannot
+present 100+ colours and will need to scroll, page or grid.
+
+**Cost is now 15.6s per conversion** in Python at up to 2400px, driven by the bisection running
+segmentation four times. Acceptable for offline batches and for an async server job, but it is a
+strong argument for the planned C++ port before conversion ever sits in front of a waiting user.
+
+## The structural limit, stated plainly
+
+Commercial colour-by-number apps look excellent because they use **illustrations** — artwork with
+flat colour areas by design, which a region-fill model reproduces exactly. Photographs are
+continuous gradients, and a region fill can only ever *posterise* them. More regions narrow the gap
+and more colours barely touch it.
+
+So the achievable product is a **stylised poster interpretation** of the user's photo, not a replica
+of it. That can be genuinely attractive, and the two 17.9MP images at 800-1,000 regions are the best
+evidence so far, but it is a different promise from what an illustration-based app delivers and the
+product should be honest about which it is making.

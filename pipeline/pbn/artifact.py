@@ -117,9 +117,11 @@ def build_meta(conversion) -> dict:
         "canvas": {"width": width, "height": height},
         "variant": {
             "name": conversion.variant.name,
-            "requested_colours": conversion.variant.n_colours,
-            "region_budget": conversion.variant.budget,
-            "min_radius_scale": conversion.variant.min_radius_scale,
+            "offered_colours": conversion.variant.n_colours,
+            "requested_colours": conversion.requested_colours,
+            "region_area_scale": conversion.variant.region_area_scale,
+            "target_regions": conversion.target_regions,
+            "radius_floor": round(conversion.radius_floor, 3),
         },
         "counts": {
             "regions": conversion.n_regions,

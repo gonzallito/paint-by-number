@@ -34,6 +34,8 @@ FACE_OUTLINE_RGB = (40, 200, 120)
 LEADER_RGB = (150, 150, 158)
 # Dash period in pixels for leader lines.
 DASH_LENGTH = 3.0
+# Beyond this many swatches per row the numbers stop being legible, so the strip wraps.
+MAX_SWATCHES_PER_ROW = 48
 
 
 @lru_cache(maxsize=1)
@@ -194,25 +196,39 @@ def palette_strip(
     check that luminance ordering survived.
     """
     n = int(palette_rgb.shape[0])
-    strip = np.full((height, width, 3), 250, dtype=np.uint8)
     if n == 0:
-        return strip
+        return np.full((height, width, 3), 250, dtype=np.uint8)
 
-    image = Image.fromarray(strip)
+    # Wrap onto as many rows as needed to keep each swatch wide enough for its number. A single
+    # row becomes an illegible smear past roughly 50 entries, and palettes now reach 130+.
+    # Worth noting the same limit applies to the app's palette tray: a linear strip does not
+    # scale to 130 colours, so it needs to scroll, page, or wrap into a grid.
+    rows = max(1, int(np.ceil(n / MAX_SWATCHES_PER_ROW)))
+    per_row = int(np.ceil(n / rows))
+    row_height = max(20, height // rows)
+    total_height = row_height * rows
+
+    image = Image.fromarray(np.full((total_height, width, 3), 250, dtype=np.uint8))
     draw = ImageDraw.Draw(image)
-    swatch_w = width / n
-    font = _font(max(9, int(height * 0.34)))
+    swatch_w = width / per_row
+    label_band = max(8, int(row_height * 0.28))
+    font = _font(max(8, int((row_height - label_band) * 0.62)))
 
     for index in range(n):
-        x0 = int(round(index * swatch_w))
-        x1 = int(round((index + 1) * swatch_w)) - 1
+        row = index // per_row
+        column = index % per_row
+        x0 = int(round(column * swatch_w))
+        x1 = int(round((column + 1) * swatch_w)) - 1
+        y0 = row * row_height
+        y1 = y0 + row_height - label_band
+
         colour = tuple(int(c) for c in palette_rgb[index])
-        draw.rectangle([x0, 0, x1, height - 18], fill=colour, outline=(210, 210, 214))
+        draw.rectangle([x0, y0, x1, y1], fill=colour, outline=(210, 210, 214))
 
         # Label in whichever of black/white contrasts better with the swatch.
         luma = 0.299 * colour[0] + 0.587 * colour[1] + 0.114 * colour[2]
         draw.text(
-            ((x0 + x1) / 2, (height - 18) / 2),
+            ((x0 + x1) / 2, (y0 + y1) / 2),
             str(index + 1),
             font=font,
             fill=(20, 20, 20) if luma > 140 else (245, 245, 245),
@@ -220,6 +236,10 @@ def palette_strip(
         )
         # Underline the entries that came from the subject k-means.
         if from_subject is not None and index < from_subject.shape[0] and from_subject[index]:
-            draw.line([x0 + 2, height - 14, x1 - 2, height - 14], fill=SUBJECT_TINT_RGB, width=3)
+            draw.line(
+                [x0 + 2, y1 + label_band // 2, x1 - 2, y1 + label_band // 2],
+                fill=SUBJECT_TINT_RGB,
+                width=2,
+            )
 
     return np.asarray(image)
