@@ -58,6 +58,24 @@ DIGIT_HEIGHT_PER_RADIUS = 0.95
 # outlines and gaps. They are not artefacts of merging and cannot be merged away.
 LEADER_DIRECTIONS = 16
 LEADER_MAX_LENGTH_FACTOR = 16.0  # multiples of the minimum digit height
+
+# --- Zoom-based reveal ---------------------------------------------------------------------
+#
+# Numbers render at constant *screen* size, so a region's screen area grows with zoom while its
+# digit does not. Every region therefore becomes numberable at sufficient zoom, and the right
+# behaviour is to reveal small regions' numbers as the user zooms in rather than to cram them all
+# onto the fit-to-screen view.
+#
+# This also demotes leader lines. Leaders solve a *print* problem, where there is no zoom to
+# defer to; on a zoomable canvas they are only needed for regions that would demand an
+# impractical zoom.
+#
+# Reference viewport for expressing reveal zoom. Zoom 1.0 means the whole canvas fits the
+# screen; 3.0 means the user has zoomed to 3x that.
+REFERENCE_SCREEN_LONG_EDGE = 900.0
+COMFORTABLE_DIGIT_SCREEN_PX = 11.0
+# Beyond this the region is so small that waiting for zoom is worse than a leader line.
+MAX_PRACTICAL_ZOOM = 8.0
 LEADER_STEP_FACTOR = 0.5  # search granularity, also in digit heights
 # Padding around a label box when reserving space, so adjacent numbers do not touch.
 LABEL_PADDING = 2.0
@@ -75,6 +93,16 @@ class Numbering:
     digit_heights: np.ndarray  # (N,) float32, height to draw at (0 = no label at all)
     label_positions: np.ndarray  # (N, 2) int32, where the digit is actually drawn
     has_leader: np.ndarray  # (N,) bool, label sits outside and needs a connector line
+    reveal_zoom: np.ndarray  # (N,) float32, zoom at which the number becomes legible (1 = always)
+
+    def visible_at(self, zoom: float) -> np.ndarray:
+        """Regions whose number should be shown at this zoom level."""
+        return self.fits & (self.reveal_zoom <= zoom + 1e-6)
+
+    def visible_fraction(self, zoom: float) -> float:
+        if self.reveal_zoom.size == 0:
+            return 0.0
+        return float(self.visible_at(zoom).mean())
 
     @property
     def fits(self) -> np.ndarray:
@@ -115,6 +143,25 @@ def text_half_diagonal(digits: int, height: float) -> float:
 def required_radius(digits: int, height: float) -> float:
     """Inscribed radius needed to comfortably hold ``digits`` numerals at ``height``."""
     return text_half_diagonal(digits, height) * FIT_SAFETY
+
+
+def largest_fitting_height(digits: int, radius: float) -> float:
+    """Tallest digit height that fits inside an inscribed ``radius``.
+
+    The inverse of :func:`required_radius`, which is linear in height, so this is exact rather
+    than a search.
+    """
+    per_unit = float(np.hypot(digits * DIGIT_ASPECT, 1.0) / 2.0) * FIT_SAFETY
+    return radius / per_unit if per_unit > 0 else 0.0
+
+
+def fit_to_screen_digit_height(long_edge: int) -> float:
+    """Digit height in *canvas* pixels when the whole canvas fits the reference screen.
+
+    A comfortable on-screen numeral is a fixed number of device pixels, which corresponds to more
+    canvas pixels on a large canvas than a small one — hence the scaling.
+    """
+    return COMFORTABLE_DIGIT_SCREEN_PX * (long_edge / REFERENCE_SCREEN_LONG_EDGE)
 
 
 def _interior_point(mask: np.ndarray) -> tuple[int, int, float]:
@@ -160,11 +207,16 @@ def place(
         max_digit_height = default_max
 
     height_map, width_map = labels.shape
+    # Digit height at fit-to-screen. Regions that cannot hold this get a proportionally smaller
+    # digit and a reveal zoom above 1, rather than being forced or dropped.
+    screen_height = fit_to_screen_digit_height(max(labels.shape))
+
     centres = np.zeros((n_regions, 2), dtype=np.int32)
     radii = np.zeros(n_regions, dtype=np.float32)
     heights = np.zeros(n_regions, dtype=np.float32)
     label_positions = np.zeros((n_regions, 2), dtype=np.int32)
     has_leader = np.zeros(n_regions, dtype=bool)
+    reveal_zoom = np.ones(n_regions, dtype=np.float32)
 
     # Reserved space, so labels never overlap one another.
     occupancy = np.zeros(labels.shape, dtype=bool)
@@ -217,23 +269,27 @@ def place(
         radii[region] = radius
         digits = digits_for[region]
 
-        # Scale the digit to the room available, then verify it actually fits. A region can
-        # have ample area yet no interior room if it is long and thin, which is precisely
-        # the case an area-only threshold misses.
-        desired = float(
-            np.clip(radius * DIGIT_HEIGHT_PER_RADIUS, min_digit_height, max_digit_height)
-        )
-        if radius >= required_radius(digits, desired):
-            text_height = desired
-        elif radius >= required_radius(digits, min_digit_height):
-            text_height = min_digit_height
-        else:
+        # Largest digit that fits this region's interior, capped at the fit-to-screen size —
+        # there is no reason for a big region to carry a bigger number than the user needs.
+        fitting = largest_fitting_height(digits, radius)
+        text_height = min(screen_height, fitting)
+
+        # A region too small for the on-screen size is not a failure: its number simply appears
+        # once the user zooms in far enough. Zoom needed is the ratio of the two heights.
+        zoom = screen_height / text_height if text_height > 1e-6 else float("inf")
+
+        if zoom > MAX_PRACTICAL_ZOOM:
+            # Waiting for an impractical zoom is worse than a leader line, so fall back.
             needs_leader.append(region)
             continue
 
         heights[region] = text_height
+        reveal_zoom[region] = max(1.0, zoom)
         label_positions[region] = (anchor_x, anchor_y)
-        reserve(label_box(anchor_x, anchor_y, digits, text_height))
+        # Only reserve space for numbers actually shown at fit-to-screen. A number revealed at
+        # higher zoom cannot collide with anything, because everything around it has also grown.
+        if zoom <= 1.0 + 1e-6:
+            reserve(label_box(anchor_x, anchor_y, digits, text_height))
 
     # --- Pass 2: leader lines for everything that did not fit ---------------------------
     # Leaders always use the minimum digit height: they are a fallback, and a compact label
@@ -262,6 +318,9 @@ def place(
                     heights[region] = min_digit_height
                     label_positions[region] = (int(round(candidate_x)), int(round(candidate_y)))
                     has_leader[region] = True
+                    # Leadered labels sit in free space at their own size, so they are legible
+                    # from the outset rather than waiting on zoom.
+                    reveal_zoom[region] = 1.0
                     reserve(candidate)
                     placed = True
                     break
@@ -279,4 +338,5 @@ def place(
         digit_heights=heights,
         label_positions=label_positions,
         has_leader=has_leader,
+        reveal_zoom=reveal_zoom,
     )

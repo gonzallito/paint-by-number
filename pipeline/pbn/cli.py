@@ -68,6 +68,11 @@ def main() -> int:
         help="comma-separated detail levels to render",
     )
     p_convert.add_argument("--cache", default=".cache/subject", help="subject-mask cache directory")
+    p_convert.add_argument(
+        "--artifacts",
+        default=None,
+        help="also write artifact bundles (display.png, regions.png, meta.json) here",
+    )
 
     args = parser.parse_args()
 
@@ -86,6 +91,7 @@ def main() -> int:
             out_dir=args.out,
             variant_names=tuple(v.strip() for v in args.variants.split(",") if v.strip()),
             cache_dir=args.cache,
+            artifact_dir=args.artifacts,
         )
 
     parser.error(f"unknown command: {args.command}")
@@ -93,12 +99,16 @@ def main() -> int:
 
 
 def convert_command(
-    input_dir: str, out_dir: str, variant_names: tuple[str, ...], cache_dir: str
+    input_dir: str,
+    out_dir: str,
+    variant_names: tuple[str, ...],
+    cache_dir: str,
+    artifact_dir: str | None = None,
 ) -> int:
     """Convert every image in ``input_dir`` and write one contact sheet per image."""
     import time
 
-    from pbn import contact, images, pipeline
+    from pbn import artifact, contact, images, pipeline, render
 
     paths = images.list_images(input_dir)
     if not paths:
@@ -126,6 +136,14 @@ def convert_command(
                 f"{conversion.n_colours:8d} {conversion.unlabelled_fraction:6.1%} {elapsed:6.1f}s"
             )
             summary.append((path.stem, conversion))
+            if artifact_dir is not None:
+                artifact.write_bundle(
+                    conversion,
+                    Path(artifact_dir) / path.stem / conversion.variant.name,
+                    display=render.outline_canvas(
+                        conversion.labels, conversion.numbering, conversion.region_colour
+                    ),
+                )
             panels.append(
                 contact.build_row(
                     original=conversion.working,

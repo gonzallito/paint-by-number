@@ -24,7 +24,7 @@ from pbn import color
 # unwieldy on a phone. Curated illustration works at 8-12 because an artist designed
 # within that budget; photographs need more, especially for skin tones.
 MIN_COLOURS = 8
-MAX_COLOURS = 64
+MAX_COLOURS = 220
 
 # Palette entries closer than this in CIE76 are visually near-identical. Two numbers the
 # user cannot tell apart is worse than one, so they get folded together.
@@ -118,6 +118,36 @@ def _dedupe(palette_lab: np.ndarray, protected: int) -> tuple[np.ndarray, int]:
             keep.append(index)
     kept_subject = sum(1 for i in keep if i < protected)
     return palette_lab[keep], kept_subject
+
+
+def prune_unused(
+    palette_lab: np.ndarray,
+    palette_rgb: np.ndarray,
+    from_subject: np.ndarray,
+    region_colour: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Drop palette entries no region uses, and renumber the rest.
+
+    Necessary because the palette is built *before* merging, and merging re-snaps each surviving
+    region to its nearest entry — so entries can end up orphaned. Left in, they appear in the
+    palette tray as numbers with nothing to paint, which is a straightforwardly broken experience.
+    Measured on a real photo: 82 palette entries of which only 59 were reachable.
+
+    Relative order is preserved, so the palette stays sorted light to dark and
+    :func:`despeckle`'s assumption about neighbouring indices still holds.
+    """
+    used = np.unique(region_colour)
+    if used.size == palette_lab.shape[0]:
+        return palette_lab, palette_rgb, from_subject, region_colour
+
+    remap = np.full(palette_lab.shape[0], -1, dtype=np.int32)
+    remap[used] = np.arange(used.size, dtype=np.int32)
+    return (
+        palette_lab[used],
+        palette_rgb[used],
+        from_subject[used],
+        remap[region_colour].astype(np.int32),
+    )
 
 
 def despeckle(labels: np.ndarray, radius: int = 1) -> np.ndarray:

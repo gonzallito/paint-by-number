@@ -483,3 +483,107 @@ it from, since that is roughly what the app shows at working zoom.
 
 If it reads as too busy, the lever is the `detailed` radius floor: 0.38 gives 19% leaders instead
 of 61%, at roughly 30% fewer regions.
+
+
+---
+
+# Addendum 4: uniform regions, deep palettes, zoom reveal
+
+Reviewer feedback reframed the product: **fidelity should come from colour depth, paintability
+from uniform region size.** Those are separate axes, and the pipeline had been buying fidelity
+with region count — which is why faces ended up with cells too small to paint.
+
+## What changed
+
+**Face tier removed.** It worked exactly as designed (face region density rose 1.44-2.67x) and
+produced the wrong artwork. Region size decides whether a canvas is pleasant to paint, so mixing
+tiny face cells with large background shapes is unpleasant however faithful it is. Faces are still
+detected, but only to annotate contact sheets.
+
+**Palettes raised to 48 / 96 / 150**, with the floor held at one comfortable density instead of
+being tightened per variant. Variants now differ mainly in colour depth.
+
+**Zoom-based label reveal.** Numbers render at constant screen size, so a region's screen area
+grows with zoom while its digit does not — every region becomes numberable at sufficient zoom. Each
+region carries a `reveal_zoom`, and only regions that can hold a legible number are labelled at
+fit-to-screen. Measured: **53-80% of numbers visible at fit-to-screen, 93-100% at 2x**.
+
+This **eliminated leader lines entirely — 0.0% on every image.** Leaders solve a *print* problem,
+where there is no zoom to defer to. Building them first was solving the right problem in the wrong
+medium; they remain as a fallback beyond `MAX_PRACTICAL_ZOOM` but never trigger in practice.
+
+**Artifact bundle written** (`pbn/artifact.py`, format version 2): `display.png`, `regions.png`
+(region ids encoded in 24-bit RGB, verified to round-trip exactly) and `meta.json` carrying the
+palette, per-region geometry including `reveal_zoom`, and a `regions_by_colour` index so selecting
+a colour can highlight its regions without scanning the ID map. With a 100+ colour palette each
+colour owns few regions, which makes that highlight essential rather than decorative.
+
+## Bug found: dead palette entries
+
+The palette is built *before* merging, and merging re-snaps each surviving region to its nearest
+entry — so entries can end up orphaned. Measured: **82 palette entries of which only 59 were
+reachable**, i.e. 23 numbers in the tray with nothing to paint. Fixed by pruning unused entries and
+renumbering before placement (renumbering must precede placement, since digit count affects fit).
+
+## The binding constraint: palette size is capped by region count
+
+Correlation between region count and usable palette size: **0.849**, at roughly one usable colour
+per 2-4 regions.
+
+| detailed (150 requested) | regions | usable colours |
+|---|---|---|
+| praga | 137 | 73 |
+| deniro | 151 | 75 |
+| juve | 455 | 119 |
+| rubinho | 387 | 129 |
+
+**A 100-200 colour palette therefore requires roughly 300-600 regions.** Requesting 150 colours on
+a 150-region canvas returns about 75, because there is nowhere to put the rest.
+
+### Canvas size is the lever, and source resolution bounds it
+
+The radius floor was scaled by canvas long edge, which held region count constant at any resolution
+— the cause of the earlier, wrong conclusion that "resolution is not a lever". An **absolute** floor
+was implemented and measured:
+
+| | 1400px canvas | 2800px canvas |
+|---|---|---|
+| CIES (17.9MP source) | 281 regions / 115 colours | **844 / 132** |
+| praga (17.9MP source) | 146 / 79 | **463 / 105** |
+| deniro (0.8MP source) | 112 / 60 | 122 / 69 |
+| anime (0.5MP source) | 102 / 50 | 100 / 49 |
+
+It behaves exactly as the reasoning predicts and was still **reverted**: it lifts high-resolution
+sources dramatically while *reducing* region count for ordinary web-sized images, which lose the
+proportionally finer floor they were getting. Most real uploads are 0.4-2.6MP, so relative wins on
+the mix.
+
+The conclusion is a product one rather than a tuning one: **region count is ultimately bounded by
+detail present in the source photo.** Reaching 100-200 colours consistently needs high-resolution
+uploads and a canvas the user pans and zooms around, which is what large-artwork colour-by-number
+apps actually are.
+
+## Background simplification softened
+
+Isolating it showed aggressive background collapse was costing one portrait **40% of its regions**
+(250 -> 148) and 11 usable colours. Tidiness was being bought with exactly the fidelity and colour
+depth the product sells. Now a mild coarsening: flatten boost 1.5 -> 0.5, background radius
+multiplier 2.0 -> 1.4, subject budget share 0.80 -> 0.72, background region cap 45 -> 120.
+
+## Current state
+
+27 conversions, ~5.9s each. Median 255 regions (123 min, 465 max), unnumbered 0.0%, leaders 0.0%.
+
+| Variant | Requested | Usable colours | Regions | Visible at fit-to-screen |
+|---|---|---|---|---|
+| `simple` | 48 | 37-48 | 123-268 | ~80% |
+| `standard` | 96 | 61-88 | 207-423 | ~57% |
+| `detailed` | 150 | 67-135 | 204-465 | ~53% |
+
+## Open decision
+
+Reaching a consistent 100-200 colour palette requires 300-600 regions, and that requires
+high-resolution source photos. Of the current corpus only the two 17.9MP images can supply it; the
+web-sized ones top out around 70-90 colours whatever is requested. The choice is whether to target
+large, high-resolution artworks (long sessions, deep palettes, heavy panning) or accept that
+ordinary phone-sized uploads produce 200-400 region canvases with 70-130 colours.

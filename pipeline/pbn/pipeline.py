@@ -16,21 +16,22 @@ import numpy as np
 
 from pbn import color, faces, images, numbering, preprocess, quantize, segment, subject
 
-# Segmentation runs at this long edge regardless of the input size. Measured: raising it to
-# 2000 or 2800px does not increase region count (131 -> 129 -> 124 median) because the
-# thresholds and the image content scale together, while cost rises 3.1s -> 4.3s. The
-# eventual high-resolution artifact should come from upscaling the label map, not from
-# segmenting at full size.
+# Canvas size for segmentation. Raised from 1400 once the radius floor became absolute rather
+# than canvas-relative (see pbn/segment.py): with an absolute floor, a larger canvas genuinely
+# yields more regions and therefore more usable palette entries, whereas before it did not.
+#
+# The gain only materialises for high-resolution sources — a 0.8MP web image has no further
+# detail to resolve and is never upscaled. Region count is ultimately bounded by the source photo.
 WORKING_LONG_EDGE = 1400
 
 # Subject budget share when the background is fully defocused. A bokeh backdrop needs only a
 # handful of shapes, so nearly the whole budget should go to the subject.
-MAX_SUBJECT_SHARE = 0.93
+MAX_SUBJECT_SHARE = 0.82
 
 # Absolute ceiling on background regions at full simplification. Expressed as a count rather
 # than a share because "how many shapes does an out-of-focus backdrop deserve" does not depend
 # on how detailed the user asked the subject to be.
-BACKGROUND_REGIONS_WHEN_FLAT = 45
+BACKGROUND_REGIONS_WHEN_FLAT = 120
 
 
 @dataclass(frozen=True)
@@ -64,10 +65,22 @@ class Variant:
 #
 # An earlier sweep judged palette size by region count and wrongly concluded it barely mattered.
 # Palette size buys colour *fidelity*, which is what "it does not look like the photo" means.
+# Variants now differ mainly by **palette size**, not by region size.
+#
+# This is a reversal. Earlier variants bought detail by shrinking regions (floors 0.60 / 0.40 /
+# 0.30), which produced canvases mixing large background shapes with cells too small to paint
+# comfortably even zoomed in. Region size determines paintability, so it is held at one
+# comfortable value and colour depth carries fidelity instead.
+#
+# Measured on the real corpus at a fixed comfortable floor, going 36 -> 150 colours:
+#   mean error  6.49 -> 5.90  (only -9%, so the *metric* gain is small)
+#   regions      205 -> 310   (+50% at the SAME region size, from extra colour boundaries)
+# plus markedly less visible banding in gradients, which mean error averages away and which is
+# most of what "looks like the photo" means perceptually.
 VARIANTS: dict[str, Variant] = {
-    "simple": Variant("simple", 24, 600, 0.60, "fewer, larger regions; every one numbered"),
-    "standard": Variant("standard", 36, 1200, 0.40, "balanced; closest to the photo per effort"),
-    "detailed": Variant("detailed", 48, 2400, 0.30, "most faithful; more small regions"),
+    "simple": Variant("simple", 48, 1500, 0.75, "larger regions, quicker to finish"),
+    "standard": Variant("standard", 96, 3000, 0.60, "comfortable regions, rich colour"),
+    "detailed": Variant("detailed", 150, 4000, 0.60, "same region size, deepest colour"),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
@@ -125,6 +138,8 @@ class Conversion:
             f"regions       {self.n_regions:,} of {self.initial_regions:,} initial\n"
             f"palette       {self.n_colours} colours (asked {self.variant.n_colours})\n"
             f"subject       {coverage} of frame -> {share_text} of regions\n"
+            f"numbers       {self.numbering.visible_fraction(1.0):.0%} shown at fit-to-screen,"
+            f" {self.numbering.visible_fraction(2.0):.0%} at 2x\n"
             f"unnumbered    {self.unlabelled_fraction:.1%}"
             f"   on leaders {self.numbering.leader_fraction:.1%}\n"
             f"texture       {self.texture:.0f} -> flatten {self.flatten_strength:.2f}\n"
@@ -196,12 +211,17 @@ def convert(
         min_radius_scale=variant.min_radius_scale,
         subject_budget_share=subject_share,
         background_region_cap=background_cap,
-        face_mask=face_mask,
     )
     timings["segment"] = time.perf_counter() - t
 
+    # Drop palette entries that no surviving region uses. Must happen before numbering, because
+    # renumbering changes how many digits a label needs and therefore whether it fits.
+    palette_lab, palette_rgb, from_subject, region_colour = quantize.prune_unused(
+        quantised.palette_lab, quantised.palette_rgb, quantised.from_subject, seg.region_colour
+    )
+
     t = time.perf_counter()
-    numbers = numbering.place(seg.labels, seg.region_colour, seg.n_regions)
+    numbers = numbering.place(seg.labels, region_colour, seg.n_regions)
     timings["numbering"] = time.perf_counter() - t
 
     return Conversion(
@@ -211,13 +231,13 @@ def convert(
         face_mask=face_mask,
         subject_coverage=None if found is None else found.coverage,
         labels=seg.labels,
-        region_colour=seg.region_colour,
-        palette_rgb=quantised.palette_rgb,
-        from_subject=quantised.from_subject,
+        region_colour=region_colour,
+        palette_rgb=palette_rgb,
+        from_subject=from_subject,
         numbering=numbers,
         n_regions=seg.n_regions,
         initial_regions=seg.initial_regions,
-        n_colours=quantised.n_colours,
+        n_colours=int(palette_rgb.shape[0]),
         texture=texture,
         flatten_strength=strength,
         background_simplify=simplify,

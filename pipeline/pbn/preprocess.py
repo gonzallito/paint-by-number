@@ -109,7 +109,13 @@ BACKGROUND_RATIO_STRONG = 3.0
 BACKGROUND_RATIO_FLOOR = 0.75
 
 # At full simplification the background's flatten strength is multiplied by 1 + this.
-BACKGROUND_SIMPLIFY_BOOST = 1.5
+#
+# Reduced from 1.5 after the reviewer asked for uniform detail across the canvas. Measured cost of
+# aggressive background simplification on a uniform-region canvas: one portrait lost 40% of its
+# regions (250 -> 148) and 11 usable palette entries. Collapsing the background buys tidiness and
+# pays for it in exactly the fidelity and colour depth the product is selling, so it is now a mild
+# coarsening rather than a collapse.
+BACKGROUND_SIMPLIFY_BOOST = 0.5
 
 
 def background_simplification(img: np.ndarray, subject_mask: np.ndarray | None) -> float:

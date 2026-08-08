@@ -61,17 +61,21 @@ BACKGROUND_COST_SCALE = 0.30
 # values of 2.6 and 1.8 were attempts to prioritise the subject through region *size*, which
 # only ever controlled it indirectly: at 2.6 canvases collapsed to 16-259 regions, and at 1.8
 # a real portrait still gave the subject only 21% of regions for 36% of the frame.
-BACKGROUND_MIN_RADIUS_MULTIPLIER = 2.0
+BACKGROUND_MIN_RADIUS_MULTIPLIER = 1.4
 
 # Fraction of the region budget reserved for the subject regardless of its area. Backgrounds
 # are usually the least interesting part of a photo and often the most colour-varied, so they
 # need an explicit cap rather than a discount.
-DEFAULT_SUBJECT_BUDGET_SHARE = 0.80
+DEFAULT_SUBJECT_BUDGET_SHARE = 0.72
 
-# Faces get a *finer* floor than the rest of the subject — the third tier. Subject-level
-# allocation cannot help someone in flat clothing, because the clothing has no colour structure
-# to subdivide, whereas the face is both detailed and where the likeness lives.
-FACE_MIN_RADIUS_MULTIPLIER = 0.70
+# A face tier once gave faces a *finer* floor than the rest of the subject. It was removed
+# deliberately: it worked as designed (face region density rose 1.44-2.67x) and produced exactly
+# the wrong artwork. Region *size* is what determines whether a canvas is pleasant to paint, so
+# mixing tiny face cells with large background shapes is unpleasant however faithful it is.
+#
+# The lesson generalises: fidelity should come from **colour depth**, and paintability from
+# **uniform region size**. Those are separate axes, and detail concentration confuses them.
+# Faces are still detected (see pbn/faces.py) but only to annotate contact sheets.
 
 # Shape term in the merge cost. Pairs with little shared border are penalised so that merging
 # builds compact regions rather than chains. The exponent controls how strongly shape competes
@@ -246,14 +250,12 @@ class _Merger:
         radius_ref: float,
         min_radius: float,
         preserve_silhouette: bool,
-        is_face: np.ndarray | None = None,
     ) -> None:
         self.n = int(area.shape[0])
         self.area = area.astype(np.float64).copy()
         self.perimeter = perimeter.astype(np.float64).copy()
         self.sums = sums.astype(np.float64).copy()
         self.is_subject = is_subject.copy()
-        self.is_face = np.zeros(self.n, dtype=bool) if is_face is None else is_face.copy()
         # With no subject detected there is no foreground to protect, so the coarse
         # background floor must not apply — otherwise every region on a subject-less image
         # gets treated as background and the whole frame over-merges.
@@ -322,9 +324,7 @@ class _Merger:
         return True
 
     def _min_radius_for(self, i: int) -> float:
-        """Per-region floor across three tiers: face finest, then subject, then background."""
-        if self.is_face[i]:
-            return self.min_radius * FACE_MIN_RADIUS_MULTIPLIER
+        """Per-region floor. Uniform for the subject; only the background is coarser."""
         if self.is_subject[i] or not self.has_subject:
             return self.min_radius
         return self.min_radius * BACKGROUND_MIN_RADIUS_MULTIPLIER
@@ -347,9 +347,6 @@ class _Merger:
         self.area[a] += self.area[b]
         self.sums[a] += self.sums[b]
         self.is_subject[a] = bool(self.is_subject[a] or self.is_subject[b])
-        # Tier is inherited optimistically: a merged region containing any face pixels keeps
-        # the finest floor, so absorbing a neighbour cannot demote the face's protection.
-        self.is_face[a] = bool(self.is_face[a] or self.is_face[b])
         self.alive[b] = False
         self.parent[b] = a
         self.generation[a] += 1
@@ -489,7 +486,6 @@ def segment(
     min_radius_scale: float = DEFAULT_MIN_RADIUS_SCALE,
     subject_budget_share: float = DEFAULT_SUBJECT_BUDGET_SHARE,
     background_region_cap: int | None = None,
-    face_mask: np.ndarray | None = None,
 ) -> Segmentation:
     """Extract regions from a quantised image and merge them.
 
@@ -507,8 +503,19 @@ def segment(
 
     area, sums, is_subject = _region_stats(labels, lab, initial, subject_mask)
 
-    # Radius is a length, so both thresholds scale linearly with the long edge. That keeps
-    # the *proportion* of regions falling below them resolution-independent.
+    # Thresholds scale linearly with the canvas long edge (radius is a length), which keeps the
+    # *proportion* of regions below them constant across canvas sizes.
+    #
+    # An absolute floor was tried, on the reasoning that comfortable region size is a property of
+    # the screen rather than the canvas. It behaves exactly as that argument predicts and is still
+    # a net loss on real input: it raises region count only for high-resolution sources (a 17.9MP
+    # photo went 281 -> 844 regions and 115 -> 132 usable colours) while *reducing* it for ordinary
+    # web-sized images, which lose the proportionally finer floor they were getting. Since most
+    # real uploads are 0.4-2.6MP, relative wins on the mix.
+    #
+    # The insight still stands for later: to get 300-600+ regions and a 100+ colour palette, the
+    # canvas must be large relative to comfortable region size, and only a high-resolution source
+    # can supply that. Region count is ultimately bounded by detail present in the original photo.
     long_edge = max(labels.shape)
     resolution_scale = long_edge / REFERENCE_LONG_EDGE
     radius_ref = RADIUS_REF_AT_1400 * resolution_scale
@@ -516,18 +523,6 @@ def segment(
 
     # Always run the merge. Even when the initial count is already under the ceiling,
     # slivers still need absorbing.
-    if face_mask is None:
-        is_face = None
-    else:
-        # A region counts as face if a majority of its pixels fall inside the face mask, the
-        # same rule used for the subject.
-        flat = labels.ravel()
-        inside_face = np.bincount(
-            flat, weights=(face_mask > 127).ravel().astype(np.float64), minlength=initial
-        )
-        with np.errstate(invalid="ignore", divide="ignore"):
-            is_face = (inside_face / np.maximum(area, 1)) >= SUBJECT_PIXEL_MAJORITY
-
     pairs, shared, perimeter = _adjacency(labels, initial)
     merger = _Merger(
         pairs=pairs,
@@ -539,7 +534,6 @@ def segment(
         radius_ref=radius_ref,
         min_radius=min_radius,
         preserve_silhouette=preserve_silhouette,
-        is_face=is_face,
     )
     merger.absorb_undersized()
 

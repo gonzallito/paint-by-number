@@ -110,8 +110,15 @@ def outline_canvas(
     numbering: Numbering,
     region_colour: np.ndarray,
     draw_numbers: bool = True,
+    zoom: float | None = None,
 ) -> np.ndarray:
-    """The colourable page: outlines on white, with each region's number placed inside."""
+    """The colourable page: outlines on white, with region numbers placed inside.
+
+    ``zoom`` restricts drawing to the numbers a user would actually see at that zoom level, where
+    1.0 is the whole canvas fitted to the screen. ``None`` draws every number regardless, which is
+    what the 1:1 detail view wants. Rendering at 1.0 shows the sparse first impression: only
+    regions large enough to carry a legible number at that scale.
+    """
     canvas = np.full((*labels.shape, 3), CANVAS_RGB, dtype=np.uint8)
     canvas[boundaries(labels)] = OUTLINE_RGB
 
@@ -120,7 +127,10 @@ def outline_canvas(
 
     image = Image.fromarray(canvas)
     draw = ImageDraw.Draw(image)
-    labelled = np.flatnonzero(numbering.fits)
+    if zoom is None:
+        labelled = np.flatnonzero(numbering.fits)
+    else:
+        labelled = np.flatnonzero(numbering.visible_at(zoom))
 
     # Draw every connector first, so no leader crosses over a number.
     for region in labelled:

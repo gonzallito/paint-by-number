@@ -46,3 +46,6 @@ pipeline/.cache/
 
 # Face detector model (downloaded on demand)
 pipeline/.cache/models/
+
+# Artifact bundles written by `pbn convert --artifacts`
+artifacts/

@@ -41,7 +41,13 @@ RULE = (222, 222, 226)
 HEADING = (40, 40, 46)
 BODY = (60, 60, 66)
 
-COLUMNS = ("original", "subject + faces", "colourable page", "page at 1:1", "filled result")
+COLUMNS = (
+    "original",
+    "subject + faces",
+    "page as first seen",
+    "detail at 1:1 (all numbers)",
+    "filled result",
+)
 
 
 @dataclass
@@ -93,7 +99,11 @@ def build_row(
     face_mask: np.ndarray | None = None,
 ) -> SheetRow:
     """Render every panel for one image/variant combination."""
-    outline = render.outline_canvas(labels, numbering, region_colour)
+    # Two renders of the same page. At fit-to-screen only regions large enough to carry a
+    # legible number show one; the 1:1 crop shows every number, which is what the user sees once
+    # zoomed into that area. Side by side they demonstrate the zoom-reveal behaviour.
+    outline_first_seen = render.outline_canvas(labels, numbering, region_colour, zoom=1.0)
+    outline_all = render.outline_canvas(labels, numbering, region_colour, zoom=None)
     filled = render.filled_canvas(labels, region_colour, palette_rgb)
 
     # Centre the 1:1 crop on the subject when there is one, since that is where detail
@@ -105,14 +115,14 @@ def build_row(
         centre = (labels.shape[1] // 2, labels.shape[0] // 2)
 
     aspect = original.shape[1] / original.shape[0]
-    detail = _detail_crop(outline, PANEL_HEIGHT, max(80, int(PANEL_HEIGHT * aspect)), centre)
+    detail = _detail_crop(outline_all, PANEL_HEIGHT, max(80, int(PANEL_HEIGHT * aspect)), centre)
 
     panels = [
         _fit_height(original, PANEL_HEIGHT),
         _fit_height(
             render.subject_overlay(original, subject_mask, face_mask=face_mask), PANEL_HEIGHT
         ),
-        _fit_height(outline, PANEL_HEIGHT),
+        _fit_height(outline_first_seen, PANEL_HEIGHT),
         detail,
         _fit_height(filled, PANEL_HEIGHT),
     ]
