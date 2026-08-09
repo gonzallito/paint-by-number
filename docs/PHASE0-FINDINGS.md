@@ -667,3 +667,91 @@ So the achievable product is a **stylised poster interpretation** of the user's 
 of it. That can be genuinely attractive, and the two 17.9MP images at 800-1,000 regions are the best
 evidence so far, but it is a different promise from what an illustration-based app delivers and the
 product should be honest about which it is making.
+
+
+---
+
+# Addendum 6: why small sources looked poor, and stylisation
+
+## Why one image had almost no detail
+
+Purely arithmetic. Region count is proportional to **canvas area**, and `fit_long_edge` never
+upscaled, so a 706x519 download kept its native size:
+
+| image | source | canvas | canvas MP | target regions |
+|---|---|---|---|---|
+| juve | 706x519 | 706x519 | 0.37 | 115 |
+| deniro | 967x860 | 967x860 | 0.83 | 260 |
+| martim | 2160x2880 | 1800x2400 | 4.32 | 1,350 |
+
+11.7x less canvas area gives 11.7x fewer regions. Nothing was wrong; the image was simply small.
+
+### Upscaling small sources was the fix, and the reasoning against it was wrong
+
+The rule "never upscale, it invents detail that becomes regions" sounded principled and did not
+survive measurement. Enlarging that 0.4MP photo to 1900px took it from **119 regions / 36 colours to
+852 / 93**, with no visible interpolation artefacts, and the filled result went from crudely
+posterised to close to the original.
+
+There is a second, unanticipated benefit: Lanczos upscaling *suppresses* high-frequency content, so
+measured texture fell from **553 to 19** and the adaptive flattening backed off from 1.34 to 0.70 —
+preserving more genuine detail. Enlargement helps twice.
+
+`images.ensure_long_edge()` now enlarges sources below 1800px. Results:
+
+| image | before | after |
+|---|---|---|
+| juve | 119 regions / 36 col | 811 / 90 |
+| perfecttiming | 131 / 33 | 1,150 / 83 |
+| rubinho | 233 / 82 | 897 / 89 |
+| deniro | 266 / 69 | 512 / 79 |
+
+Lanczos specifically, not bilinear: bilinear leaves a soft halo at every edge that quantises into
+thin ring regions.
+
+## Stylisation (opt-in, `pbn convert --stylise`)
+
+Four earlier attempts at the contour-map page problem all *smoothed* the photograph, which reduces
+how many tonal bands hair breaks into without changing their **directionality** — strands survive as
+ribbons either way. Morphological opening-closing is categorically different: it **deletes**
+structures narrower than its kernel. That was the missing operation.
+
+| image | initial regions | conversion time | final regions |
+|---|---|---|---|
+| martim | 53,407 → 15,687 (−71%) | 113s → 49s | 1,234 → 1,121 |
+| leonorGoncalo | 65,500 → 17,980 (−73%) | 80s → 54s | 1,504 → 1,291 |
+| porto | 19,208 → 4,626 (−76%) | 43s → 37s | 842 → **507** |
+| tese | 39,329 → 20,302 (−48%) | 88s → 47s | 1,120 → 974 |
+
+Visually the page is transformed: the 1:1 detail view goes from a dense mass of thin snaking ribbons
+to large rounded regions with clearly legible numbers. This is the first attempt at that problem to
+actually work.
+
+### Two bugs found while building it
+
+**Edge protection defeated the whole stage.** A first version protected the strongest gradients from
+the morphology, to keep silhouettes sharp. But in hair *almost every pixel* is a strong gradient, so
+the protection covered exactly the texture being targeted — initial regions came out unchanged
+(65,500 vs 67,861) where the unprotected version cut them 74%. Fixed by gating protection on local
+texture: an isolated boundary has a strong gradient in a *quiet* neighbourhood, hair has one in a
+*busy* neighbourhood, and only the former is worth keeping.
+
+**Detection must precede stylisation.** Running subject and face detection on the stylised image
+degraded it badly — face count on a two-person photo fell from 3 to 1, because the morphology had
+removed the features the detector relies on.
+
+### Shapes from the stylised image, colours from the original
+
+Stylisation initially cost fill sharpness — faces came out visibly mushy. But region *shapes* and
+region *colours* are computed from separate arrays, so they can be sourced separately: boundaries
+from the stylised image, colours averaged from the unstylised one, with a single palette built from
+the colour source so everything agrees.
+
+That recovers the fill almost entirely while keeping the clean page. It is the difference between
+stylisation being a trade-off and being close to free.
+
+### Where it costs something
+
+`porto` loses real content (842 → 507 regions): the morphology removed enough structure that the
+area-derived target became unreachable. Stylisation is not universally free, which is why it stays
+**opt-in** with its own output directory rather than becoming the default.

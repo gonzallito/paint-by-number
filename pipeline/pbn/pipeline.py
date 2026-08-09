@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pbn import color, faces, images, numbering, preprocess, quantize, segment, subject
+from pbn import color, faces, images, numbering, preprocess, quantize, segment, stylise, subject
 
 # --- Adaptive sizing -----------------------------------------------------------------------
 #
@@ -26,7 +26,12 @@ from pbn import color, faces, images, numbering, preprocess, quantize, segment, 
 # get regions of the same comfortable size and simply differ in how many there are. This is what
 # makes one set of settings work for both.
 MAX_WORKING_LONG_EDGE = 2400
-MIN_WORKING_LONG_EDGE = 900
+# Small sources are enlarged to this before conversion. Region count is proportional to canvas
+# area, so without it a 0.4MP download yields ~120 regions against ~1,350 for a 6MP phone photo.
+# Measured: enlarging such an image to 1900px took it from 119 regions / 36 colours to 852 / 93,
+# with no visible interpolation artefacts and a markedly better filled result.
+# See images.ensure_long_edge for why Lanczos specifically.
+MIN_WORKING_LONG_EDGE = 1800
 
 # Target area per region, in canvas pixels — the painting grain. ~3,200px is roughly 57x57,
 # comfortable to tap and fill.
@@ -227,6 +232,7 @@ def target_region_count(canvas_shape: tuple[int, int], variant: Variant) -> int:
 
 def _segment_to_target(
     quantised,
+    boundary_labels: np.ndarray,
     lab: np.ndarray,
     mask: np.ndarray | None,
     target: int,
@@ -245,7 +251,7 @@ def _segment_to_target(
     for _ in range(FLOOR_SEARCH_STEPS):
         middle = (low + high) / 2.0
         candidate = segment.segment(
-            quantised.labels,
+            boundary_labels,
             quantised.n_colours,
             lab,
             quantised.palette_lab,
@@ -271,15 +277,22 @@ def convert(
     working_long_edge: int | None = None,
     model_cache: str | Path = ".cache/models",
     detect_faces: bool = True,
+    stylise_input: bool = False,
 ) -> Conversion:
-    """Convert one image at one detail level."""
+    """Convert one image at one detail level.
+
+    ``stylise_input`` enables the optional morphological stylisation stage (see pbn/stylise.py),
+    which removes thin structures such as hair strands before conversion.
+    """
     timings: dict[str, float] = {}
 
     t = time.perf_counter()
-    working = images.fit_long_edge(
-        img,
-        working_long_edge if working_long_edge is not None else canvas_long_edge(img, variant),
+    requested_edge = (
+        working_long_edge if working_long_edge is not None else canvas_long_edge(img, variant)
     )
+    # Enlarge first if the source is small, then fit down. Both are needed: a tiny source must grow
+    # to earn a reasonable region count, and a 48MP source must shrink to stay tractable.
+    working = images.fit_long_edge(images.ensure_long_edge(img, requested_edge), requested_edge)
     timings["resize"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -296,7 +309,23 @@ def convert(
     texture = preprocess.texture_score(working)
     strength = preprocess.suggest_strength(working)
     simplify = preprocess.background_simplification(working, mask)
-    flat = preprocess.flatten_texture_adaptive(working, mask, simplify_background=simplify)
+    # Stylisation runs *after* subject and face detection, never before. Detecting on the stylised
+    # image degrades both: measured, face count on a two-person photo fell from 3 to 1 because the
+    # morphology had removed the features the detector relies on.
+    styled = stylise.stylise(working) if stylise_input else working
+    if stylise_input:
+        timings["stylise"] = 0.0  # folded into the flatten timing below
+
+    flat = preprocess.flatten_texture_adaptive(styled, mask, simplify_background=simplify)
+    # Region *shapes* come from the quantised (possibly stylised) image, but region *colours* are
+    # averaged from this array. Sampling the unstylised image therefore gives clean blobby
+    # boundaries with colour faithful to the original photo, instead of paying for the shapes with
+    # washed-out fill.
+    colour_source = (
+        preprocess.flatten_texture_adaptive(working, mask, simplify_background=simplify)
+        if stylise_input
+        else flat
+    )
     timings["flatten"] = time.perf_counter() - t
 
     target = target_region_count(working.shape[:2], variant)
@@ -307,8 +336,17 @@ def convert(
     requested_colours = min(variant.n_colours, hostable)
 
     t = time.perf_counter()
-    quantised = quantize.quantize(flat, requested_colours, subject_mask=mask)
-    lab = color.rgb_to_lab(flat)
+    # The palette is built from the colour source (the unstylised image when stylising), so that
+    # palette, region colours and the final fill all agree. Boundaries are then taken from the
+    # stylised image quantised against that same palette — one k-means, one colour space.
+    quantised = quantize.quantize(colour_source, requested_colours, subject_mask=mask)
+    if stylise_input:
+        boundary_labels = quantize.despeckle(
+            color.nearest_palette_index(color.rgb_to_lab(flat), quantised.palette_lab)
+        )
+    else:
+        boundary_labels = quantised.labels
+    lab = color.rgb_to_lab(colour_source)
     timings["quantize"] = time.perf_counter() - t
 
     # A defocused background loses region budget as well as detail. Flattening alone is not
@@ -328,7 +366,9 @@ def convert(
     )
 
     t = time.perf_counter()
-    floor, seg = _segment_to_target(quantised, lab, mask, target, subject_share, background_cap)
+    floor, seg = _segment_to_target(
+        quantised, boundary_labels, lab, mask, target, subject_share, background_cap
+    )
     timings["segment"] = time.perf_counter() - t
 
     # Drop palette entries that no surviving region uses. Must happen before numbering, because
@@ -373,6 +413,7 @@ def convert_all(
     variant_names: tuple[str, ...] = DEFAULT_VARIANTS,
     subject_cache: str | Path | None = None,
     model_cache: str | Path = ".cache/models",
+    stylise_input: bool = False,
 ) -> list[Conversion]:
     """Convert one image at several detail levels, for the user to choose between."""
     results = []
@@ -380,6 +421,12 @@ def convert_all(
         if name not in VARIANTS:
             raise ValueError(f"unknown variant {name!r}; expected one of {sorted(VARIANTS)}")
         results.append(
-            convert(img, VARIANTS[name], subject_cache=subject_cache, model_cache=model_cache)
+            convert(
+                img,
+                VARIANTS[name],
+                subject_cache=subject_cache,
+                model_cache=model_cache,
+                stylise_input=stylise_input,
+            )
         )
     return results

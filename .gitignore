@@ -49,3 +49,8 @@ pipeline/.cache/models/
 
 # Artifact bundles written by `pbn convert --artifacts`
 artifacts/
+
+# Comparison / experiment output folders
+out-stylised/
+out-stylise-compare/
+out-upscale-test/

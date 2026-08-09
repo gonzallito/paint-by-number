@@ -69,6 +69,11 @@ def main() -> int:
     )
     p_convert.add_argument("--cache", default=".cache/subject", help="subject-mask cache directory")
     p_convert.add_argument(
+        "--stylise",
+        action="store_true",
+        help="remove thin structures (hair strands, weave) before converting",
+    )
+    p_convert.add_argument(
         "--artifacts",
         default=None,
         help="also write artifact bundles (display.png, regions.png, meta.json) here",
@@ -92,6 +97,7 @@ def main() -> int:
             variant_names=tuple(v.strip() for v in args.variants.split(",") if v.strip()),
             cache_dir=args.cache,
             artifact_dir=args.artifacts,
+            stylise_input=args.stylise,
         )
 
     parser.error(f"unknown command: {args.command}")
@@ -104,6 +110,7 @@ def convert_command(
     variant_names: tuple[str, ...],
     cache_dir: str,
     artifact_dir: str | None = None,
+    stylise_input: bool = False,
 ) -> int:
     """Convert every image in ``input_dir`` and write one contact sheet per image."""
     import time
@@ -127,7 +134,9 @@ def convert_command(
     started = time.perf_counter()
     for path in paths:
         img = images.load(path)
-        conversions = pipeline.convert_all(img, variant_names, subject_cache=cache_dir)
+        conversions = pipeline.convert_all(
+            img, variant_names, subject_cache=cache_dir, stylise_input=stylise_input
+        )
         panels = []
         for conversion in conversions:
             elapsed = sum(conversion.timings.values())
