@@ -296,7 +296,7 @@ def convert(
     texture = preprocess.texture_score(working)
     strength = preprocess.suggest_strength(working)
     simplify = preprocess.background_simplification(working, mask)
-    flat = preprocess.flatten_differential(working, mask, simplify_background=simplify)
+    flat = preprocess.flatten_texture_adaptive(working, mask, simplify_background=simplify)
     timings["flatten"] = time.perf_counter() - t
 
     target = target_region_count(working.shape[:2], variant)
