@@ -755,3 +755,64 @@ stylisation being a trade-off and being close to free.
 `porto` loses real content (842 → 507 regions): the morphology removed enough structure that the
 area-derived target became unreachable. Stylisation is not universally free, which is why it stays
 **opt-in** with its own output directory rather than becoming the default.
+
+
+---
+
+# Addendum 7: stylisation rejected; what that settles
+
+The reviewer compared stylised against unstylised output across the whole corpus — twice, the second
+time on output with texture gating and unstylised colour sourcing — and chose **unstylised** both
+times. Stylisation stays implemented but **off by default**, reachable via `pbn convert --stylise`.
+
+## The verdict is sound, and worth understanding rather than just recording
+
+Two different causes of softness were tangled together, and separating them is what makes this
+decision final rather than something to revisit on a whim.
+
+**Fixable, and fixed.** The first stylised output took region *colours* from the stylised image, so
+the fill was washed out on top of everything else. Colours now come from the unstylised image, and
+that mushiness is gone — verified on a phone photo where the filled result became indistinguishable
+from unstylised at the same region count and palette.
+
+**Irreducible.** Region *boundaries* still derive from the stylised image, so textured areas get
+larger regions, and a larger region averages more of the photo into one flat colour. **Less detail in
+those areas is precisely what was requested, not a defect.** No amount of engineering removes it,
+because it is the trade itself rather than a flaw in how the trade was implemented.
+
+So the two goals genuinely conflict, but only *in textured areas*:
+
+| | smoother regions to paint | sharp finished artwork |
+|---|---|---|
+| smooth areas (skin, sky, walls) | already fine | already fine — gating leaves them untouched |
+| textured areas (hair, foliage) | needs larger regions | needs smaller regions |
+
+Texture gating narrowed the conflict to the smallest possible footprint (11-36% of pixels) and could
+not eliminate it. Anything future work tries has to *beat* this trade; rediscovering it is not
+progress.
+
+## What was kept from the exercise
+
+**Softened outlines**, now in the default path for every render: feathered boundary alpha instead of
+hard 1px lines. This was the reviewer's separate request, costs nothing in fidelity, and delivers
+much of the page-comfort improvement stylisation was chasing. A hard binary line is what a plotter
+draws; in dense areas it becomes a wiry mesh.
+
+**Upscaling small sources**, which was by far the larger quality win of the two changes in this round
+— a 0.4MP image went from 119 regions and 36 colours to 811 and 90.
+
+**The stylisation module itself**, documented and opt-in. If a learned photo-to-illustration model
+becomes reachable it should be evaluated against this same trade, with the same measurements, and the
+classical styliser gives it a baseline to beat.
+
+## Standing conclusion on the page-appearance problem
+
+Six attempts now: boundary smoothing, shape-aware merge cost, background simplification,
+texture-adaptive flattening, morphological stylisation, and texture-gated morphological stylisation.
+The first four moved the metric by single-digit percentages. The last two worked as designed and were
+rejected on the fidelity cost.
+
+That is a strong signal that the appearance of a photo-derived page is not a tuning problem. Within a
+region-fill model, boundaries follow the photo's own colour structure, and a photograph's structure
+is not what an illustrator would draw. Accepting a somewhat busier page than an illustration-based
+app is the honest position, with softened lines to take the edge off.

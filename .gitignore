@@ -54,3 +54,6 @@ artifacts/
 out-stylised/
 out-stylise-compare/
 out-upscale-test/
+
+.batch1/
+.batch2/

@@ -127,9 +127,9 @@ class Variant:
 # Colour saturates early; region count is the real lever. Palettes are capped at 96 accordingly —
 # beyond that the palette tray gets harder to use for no visible gain.
 VARIANTS: dict[str, Variant] = {
-    "simple": Variant("simple", 48, 1.0, 1400, "shorter artwork"),
+    "simple": Variant("simple", 48, 1.6, 1400, "shorter artwork"),
     "standard": Variant("standard", 72, 1.0, 1900, "medium artwork"),
-    "detailed": Variant("detailed", 96, 1.0, 2400, "longest artwork, most regions"),
+    "detailed": Variant("detailed", 96, 0.72, 2400, "longest artwork, most regions"),
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
@@ -306,8 +306,15 @@ def convert(
     face_mask = detected_faces.mask if detected_faces is not None and detected_faces.found else None
 
     t = time.perf_counter()
-    texture = preprocess.texture_score(working)
-    strength = preprocess.suggest_strength(working)
+    # Texture is measured on the ORIGINAL source, never the working canvas. Upscaling spreads every
+    # fine gradient over more pixels and collapses the Laplacian response: cat fur measured 398.6 at
+    # its native 451px and 4.7 after enlargement to 1800px, an 85x drop, which silently disabled the
+    # flattening on exactly the images that need it most.
+    texture = preprocess.texture_score(img)
+    strength = preprocess.suggest_strength(img)
+    # Filter kernels are sized in pixels, so they must grow with the canvas to cover the same
+    # features. Without this an upscaled image is barely smoothed at all.
+    spatial_scale = max(1.0, max(working.shape[:2]) / max(max(img.shape[:2]), 1))
     simplify = preprocess.background_simplification(working, mask)
     # Stylisation runs *after* subject and face detection, never before. Detecting on the stylised
     # image degrades both: measured, face count on a two-person photo fell from 3 to 1 because the
@@ -316,13 +323,25 @@ def convert(
     if stylise_input:
         timings["stylise"] = 0.0  # folded into the flatten timing below
 
-    flat = preprocess.flatten_texture_adaptive(styled, mask, simplify_background=simplify)
+    flat = preprocess.flatten_texture_adaptive(
+        styled,
+        mask,
+        simplify_background=simplify,
+        base_strength=strength,
+        spatial_scale=spatial_scale,
+    )
     # Region *shapes* come from the quantised (possibly stylised) image, but region *colours* are
     # averaged from this array. Sampling the unstylised image therefore gives clean blobby
     # boundaries with colour faithful to the original photo, instead of paying for the shapes with
     # washed-out fill.
     colour_source = (
-        preprocess.flatten_texture_adaptive(working, mask, simplify_background=simplify)
+        preprocess.flatten_texture_adaptive(
+            working,
+            mask,
+            simplify_background=simplify,
+            base_strength=strength,
+            spatial_scale=spatial_scale,
+        )
         if stylise_input
         else flat
     )

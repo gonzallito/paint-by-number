@@ -168,7 +168,7 @@ def suggest_strength(img: np.ndarray) -> float:
     return float(np.clip(strength, MIN_USEFUL_STRENGTH, MAX_USEFUL_STRENGTH))
 
 
-def _bilateral_cascade(img: np.ndarray, strength: float) -> np.ndarray:
+def _bilateral_cascade(img: np.ndarray, strength: float, spatial_scale: float = 1.0) -> np.ndarray:
     """Repeated moderate bilateral passes.
 
     Two or three moderate passes flatten more thoroughly than one aggressive pass while
@@ -177,10 +177,14 @@ def _bilateral_cascade(img: np.ndarray, strength: float) -> np.ndarray:
     """
     passes = 2 if strength <= 1.0 else 3
     sigma_color = float(np.clip(28.0 * strength, 10.0, 110.0))
-    sigma_space = float(np.clip(9.0 * strength, 5.0, 25.0))
+    # sigmaSpace is measured in PIXELS, so it must scale with the canvas. On an image upscaled 4x,
+    # every feature is 4x larger while a fixed kernel covers a quarter of what it was tuned for,
+    # leaving fur and hair barely touched.
+    sigma_space = float(np.clip(9.0 * strength * spatial_scale, 5.0, 60.0))
+    diameter = max(5, int(round(7 * spatial_scale)) | 1)
     out = img
     for _ in range(passes):
-        out = cv2.bilateralFilter(out, d=7, sigmaColor=sigma_color, sigmaSpace=sigma_space)
+        out = cv2.bilateralFilter(out, d=diameter, sigmaColor=sigma_color, sigmaSpace=sigma_space)
     return out
 
 
@@ -209,7 +213,10 @@ def _mean_shift(img: np.ndarray, strength: float) -> np.ndarray:
 
 
 def flatten(
-    img: np.ndarray, strength: float | None = None, mode: FlattenMode = DEFAULT_MODE
+    img: np.ndarray,
+    strength: float | None = None,
+    mode: FlattenMode = DEFAULT_MODE,
+    spatial_scale: float = 1.0,
 ) -> np.ndarray:
     """Flatten ``img`` (RGB uint8) ahead of quantisation.
 
@@ -221,7 +228,7 @@ def flatten(
     if strength <= 0:
         return img.copy()
     if mode == "bilateral":
-        return _bilateral_cascade(img, strength)
+        return _bilateral_cascade(img, strength, spatial_scale)
     if mode == "edgepreserve":
         return _edge_preserving(img, strength)
     if mode == "meanshift":
@@ -256,6 +263,8 @@ def flatten_texture_adaptive(
     simplify_background: float = 0.0,
     texture_strength: float = TEXTURE_FLATTEN_STRENGTH,
     mode: FlattenMode = DEFAULT_MODE,
+    base_strength: float | None = None,
+    spatial_scale: float = 1.0,
 ) -> np.ndarray:
     """Flatten with extra force wherever local texture is high.
 
@@ -269,11 +278,16 @@ def flatten_texture_adaptive(
     regions: 42% on a long-hair portrait, 4-18% on everything else — it helps every image tested and
     helps most where the problem is worst.
     """
-    base = suggest_strength(img)
+    base = suggest_strength(img) if base_strength is None else base_strength
     light = flatten_differential(
-        img, subject_mask, simplify_background=simplify_background, mode=mode
+        img,
+        subject_mask,
+        simplify_background=simplify_background,
+        mode=mode,
+        base_strength=base,
+        spatial_scale=spatial_scale,
     )
-    heavy = flatten(img, strength=base * texture_strength, mode=mode)
+    heavy = flatten(img, base * texture_strength, mode, spatial_scale)
     weight = local_texture(img)[:, :, None]
     blended = light.astype(np.float32) * (1.0 - weight) + heavy.astype(np.float32) * weight
     return np.clip(blended, 0, 255).astype(np.uint8)
@@ -286,6 +300,8 @@ def flatten_differential(
     background_scale: float = 1.8,
     mode: FlattenMode = DEFAULT_MODE,
     simplify_background: float = 0.0,
+    base_strength: float | None = None,
+    spatial_scale: float = 1.0,
 ) -> np.ndarray:
     """Flatten background harder than subject, then composite along the silhouette.
 
@@ -308,13 +324,13 @@ def flatten_differential(
     photo and unpleasant to colour — the point at which faithfulness and appeal diverge, and
     appeal should win.
     """
-    base = suggest_strength(img)
+    base = suggest_strength(img) if base_strength is None else base_strength
     background_scale = background_scale * (1.0 + simplify_background * BACKGROUND_SIMPLIFY_BOOST)
 
     if subject_mask is None:
-        return flatten(img, strength=base * background_scale, mode=mode)
+        return flatten(img, base * background_scale, mode, spatial_scale)
 
-    subject = flatten(img, strength=base * subject_scale, mode=mode)
-    background = flatten(img, strength=base * background_scale, mode=mode)
+    subject = flatten(img, base * subject_scale, mode, spatial_scale)
+    background = flatten(img, base * background_scale, mode, spatial_scale)
     keep_subject = (subject_mask > 127)[:, :, None]
     return np.where(keep_subject, subject, background)

@@ -7,6 +7,30 @@ conversion quality.
 
 See `ROADMAP.md` for full phasing and estimates.
 
+## Settled decisions — do not re-litigate
+
+**Stylisation is OFF by default and stays that way.** The reviewer compared stylised against
+unstylised output across the full corpus, twice, and chose unstylised both times: the stylised
+result still reads soft where it matters. `pbn/stylise.py` remains available behind
+`pbn convert --stylise` because the finding is worth keeping, but it is not the product.
+
+The remaining softness is **irreducible, not a bug**, and that distinction is what makes the
+decision final rather than provisional:
+
+* The *fixable* part was real and was fixed — early stylised output took its region colours from
+  the stylised image, which washed the fill out. Colours now come from the unstylised image.
+* The *irreducible* part is that region **boundaries** derive from the stylised image, so textured
+  areas get larger regions. A larger region averages more of the original photo into one flat
+  colour. Less detail in those areas is the definition of what was asked for, not a defect.
+
+So "smoother regions to paint" and "sharp finished artwork" are genuinely in conflict *in textured
+areas specifically*, and the reviewer's priority is the finished artwork. Any future attempt has to
+beat that trade, not rediscover it.
+
+**Softened outlines are in the default path.** Feathered boundary alpha rather than hard 1px lines,
+applied to every render. This was the reviewer's explicit request and carries no fidelity cost, so it
+delivers most of the page-comfort benefit that stylisation was chasing, for free.
+
 ## Three-tier region allocation
 
 Regions get one of three floors on effective radius, finest to coarsest: **face, subject,
