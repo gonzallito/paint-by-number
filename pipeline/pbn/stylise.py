@@ -47,6 +47,12 @@ EDGE_PROTECT_PERCENTILE = 96.0
 # Above it the "edge" is one strand among thousands and simplifying it is the whole point.
 TEXTURE_GATE = 0.35
 
+# Texture range over which stylisation ramps in. Below LOW the pixels are left exactly as they are,
+# above HIGH they are fully simplified. Keeps skin, sky and plain clothing pristine while hair,
+# foliage and weave are flattened into paintable masses.
+TEXTURE_GATE_LOW = 0.28
+TEXTURE_GATE_HIGH = 0.70
+
 
 def kernel_size_for(long_edge: int, scale: float = 1.0) -> int:
     """Odd kernel diameter for a canvas with this long edge."""
@@ -98,16 +104,48 @@ def morph_simplify(img: np.ndarray, size: int) -> np.ndarray:
     return cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel)
 
 
-def stylise(img: np.ndarray, scale: float = 1.0, protect_edges: bool = True) -> np.ndarray:
+def stylise(
+    img: np.ndarray,
+    scale: float = 1.0,
+    protect_edges: bool = True,
+    texture_gated: bool = True,
+) -> np.ndarray:
     """Flatten ``img`` (RGB uint8) toward illustration by removing thin structures.
 
-    ``protect_edges`` keeps the original pixels along the strongest gradients, so silhouettes and
-    facial features stay sharp while hair and weave are simplified. Without it the morphology rounds
-    off real boundaries just as happily as it removes texture.
+    ``texture_gated`` — the default and the important part — applies the morphology **only where
+    local texture is high**. Hair, foliage, grass and weave get simplified; skin, sky, painted walls
+    and plain clothing are left completely untouched.
+
+    Applying it uniformly was worse in the way that matters most. The reviewer found that uniform
+    stylisation improved the *painting surface* but left the *finished artwork* mushy, and preferred
+    unstylised output on almost every photo. That is the correct trade to refuse: the finished piece
+    is what the user keeps.
+
+    Gating fixes the trade rather than splitting it, because the two goals turn out to live in
+    different places. Nobody needs a face simplified — a face has smooth gradients and produces
+    perfectly paintable regions already. It is only *texture* that fragments into ribbons. So
+    simplify texture and leave everything else alone.
+
+    ``protect_edges`` additionally restores isolated strong gradients, keeping silhouettes crisp.
     """
     size = kernel_size_for(max(img.shape[:2]), scale)
     simplified = morph_simplify(img, size)
-    if not protect_edges:
+
+    if protect_edges:
+        keep = _strong_edges(img, dilate=max(3, size // 3))[:, :, None]
+        simplified = np.where(keep, img, simplified)
+
+    if not texture_gated:
         return simplified
-    keep = _strong_edges(img, dilate=max(3, size // 3))[:, :, None]
-    return np.where(keep, img, simplified)
+
+    from pbn.preprocess import local_texture
+
+    # Ramp in only across the upper part of the texture range, so mildly textured areas (skin pores,
+    # light fabric) stay untouched and only genuinely fibrous areas are simplified.
+    weight = np.clip(
+        (local_texture(img) - TEXTURE_GATE_LOW) / max(TEXTURE_GATE_HIGH - TEXTURE_GATE_LOW, 1e-6),
+        0.0,
+        1.0,
+    )[:, :, None]
+    blended = img.astype(np.float32) * (1.0 - weight) + simplified.astype(np.float32) * weight
+    return np.clip(blended, 0, 255).astype(np.uint8)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from skimage import segmentation as skseg
@@ -34,6 +35,10 @@ FACE_OUTLINE_RGB = (40, 200, 120)
 LEADER_RGB = (150, 150, 158)
 # Dash period in pixels for leader lines.
 DASH_LENGTH = 3.0
+# Outline softness. A hard 1px binary line reads as harsh and technical and turns dense areas into a
+# wiry mesh; feathering it makes the page look drawn. Purely cosmetic - geometry is untouched.
+OUTLINE_SOFTNESS = 0.7
+OUTLINE_GAIN = 1.6
 # Beyond this many swatches per row the numbers stop being legible, so the strip wraps.
 MAX_SWATCHES_PER_ROW = 48
 
@@ -100,6 +105,26 @@ def boundaries(labels: np.ndarray) -> np.ndarray:
     return skseg.find_boundaries(labels, mode="inner")
 
 
+def _outline_layer(labels: np.ndarray) -> np.ndarray:
+    """White canvas with soft, anti-aliased region outlines.
+
+    A hard 1px binary line is what a plotter draws, not what a colouring page looks like: it reads
+    as harsh and technical, and dense areas turn into a wiry mesh. Feathering the boundary mask and
+    using it as an alpha gives lines that look drawn rather than plotted, which is a pure rendering
+    change — region geometry, numbering and fill are all untouched.
+    """
+    mask = boundaries(labels).astype(np.float32)
+    # A light blur spreads each line over ~2px, then the gain restores enough weight that lines stay
+    # clearly visible rather than washing out to grey.
+    soft = cv2.GaussianBlur(mask, (0, 0), OUTLINE_SOFTNESS)
+    alpha = np.clip(soft * OUTLINE_GAIN, 0.0, 1.0)[:, :, None]
+
+    canvas = np.full((*labels.shape, 3), CANVAS_RGB, dtype=np.float32)
+    line = np.asarray(OUTLINE_RGB, dtype=np.float32)
+    blended = canvas * (1.0 - alpha) + line * alpha
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
 def filled_canvas(
     labels: np.ndarray, region_colour: np.ndarray, palette_rgb: np.ndarray
 ) -> np.ndarray:
@@ -121,8 +146,7 @@ def outline_canvas(
     what the 1:1 detail view wants. Rendering at 1.0 shows the sparse first impression: only
     regions large enough to carry a legible number at that scale.
     """
-    canvas = np.full((*labels.shape, 3), CANVAS_RGB, dtype=np.uint8)
-    canvas[boundaries(labels)] = OUTLINE_RGB
+    canvas = _outline_layer(labels)
 
     if not draw_numbers:
         return canvas
