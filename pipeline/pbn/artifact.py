@@ -35,6 +35,7 @@ from pathlib import Path
 import numpy as np
 
 from pbn import ARTIFACT_FORMAT_VERSION, images
+from pbn.pipeline import RECOMMENDED_VARIANT
 
 # Region ids are encoded across three 8-bit channels, so this is the ceiling. Region counts are
 # in the hundreds, so the headroom is ample.
@@ -117,6 +118,8 @@ def build_meta(conversion) -> dict:
         "canvas": {"width": width, "height": height},
         "variant": {
             "name": conversion.variant.name,
+            # Lets the app preselect without hardcoding a variant name of its own.
+            "recommended": conversion.variant.name == RECOMMENDED_VARIANT,
             "offered_colours": conversion.variant.n_colours,
             "requested_colours": conversion.requested_colours,
             "region_area_scale": conversion.variant.region_area_scale,

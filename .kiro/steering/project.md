@@ -9,6 +9,17 @@ See `ROADMAP.md` for full phasing and estimates.
 
 ## Settled decisions — do not re-litigate
 
+**Conversion quality is accepted.** The reviewer reviewed all three variants on real camera-roll
+photos and accepted `detailed` as the output to ship. `RECOMMENDED_VARIANT = "detailed"` and the
+artifact carries a `recommended` flag so the app can preselect it without hardcoding a name. The
+other two remain offered: the picker exists so the user chooses, which also turns an imperfect
+conversion from a gamble into a decision they own.
+
+**Phase 0 is therefore complete.** Do not keep tuning conversion quality without a specific
+reviewer complaint to answer — the remaining known gaps are recorded in `docs/PHASE0-FINDINGS.md`
+and none of them blocked acceptance.
+
+
 **Stylisation is OFF by default and stays that way.** The reviewer compared stylised against
 unstylised output across the full corpus, twice, and chose unstylised both times: the stylised
 result still reads soft where it matters. `pbn/stylise.py` remains available behind

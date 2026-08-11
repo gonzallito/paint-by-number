@@ -816,3 +816,64 @@ That is a strong signal that the appearance of a photo-derived page is not a tun
 region-fill model, boundaries follow the photo's own colour structure, and a photograph's structure
 is not what an illustrator would draw. Accepting a somewhat busier page than an illustration-based
 app is the honest position, with softened lines to take the edge off.
+
+
+---
+
+# Phase 0 closed: quality accepted
+
+The reviewer compared all three variants on real camera-roll photos and accepted **`detailed`** as
+the output to ship. `RECOMMENDED_VARIANT = "detailed"`, and each artifact bundle carries a
+`recommended` flag so the app can preselect without hardcoding a variant name. All three variants
+stay offered.
+
+Verified that the approved output matches current code rather than a stale render — `detailed` lands
+within ±5% of the numbers in the reviewed sheets (1,234→1,240; 1,504→1,549; 842→824; 1,120→1,084),
+because region count on photos that size is limited by image content rather than by settings.
+
+## Where the pipeline ended up
+
+| | value |
+|---|---|
+| Canvas | adaptive, 1800-2400px; sources below 1800px are enlarged |
+| Regions (`detailed`) | 800-1,600 on camera-roll photos, 500-900 on web-sized |
+| Palette | 70-95 usable colours, pruned so every number has regions |
+| Unnumbered | 0.0% |
+| Leader lines | 0.0% — zoom reveal replaced them entirely |
+| Numbers at fit-to-screen | 4-60%, rest revealed on zoom |
+| Cost | 20-110s per conversion in Python |
+| Artifact | `display.png`, `regions.png` (region-ID map), `meta.json`, format version 2 |
+
+## What made the difference, in rough order of impact
+
+1. **Effective radius rather than area** as the merge constraint — unnumbered regions 65% → 1%.
+2. **Adaptive canvas sizing plus upscaling small sources** — a 0.4MP image went from 119 regions
+   and 36 colours to 811 and 90.
+3. **Zoom-based label reveal** — eliminated leader lines and made small regions viable.
+4. **Isolating colour from region count** — established that colour saturates around 80 and region
+   count is the real fidelity lever, correcting a premise both of us had held.
+5. **Subject-aware allocation** with an explicit per-side budget split.
+6. **Measuring texture on the source rather than the working canvas** — an 85x error that silently
+   disabled flattening on every upscaled image.
+
+## Known gaps, none of which blocked acceptance
+
+* **Conversion takes 20-110s in Python.** Fine as an async job, unworkable with a user waiting. The
+  async upload flow needs designing regardless; it also turns the C++ port into a pure optimisation
+  rather than a prerequisite. Cheap headroom remains: the floor bisection runs segmentation four
+  times and rebuilds adjacency each pass.
+* **Variants converge for low-resolution sources**, since they cannot reach the larger canvas caps.
+  The app should offer fewer options for small inputs rather than three near-identical ones.
+* **The palette tray cannot be a linear strip** at 70-95 entries; it needs to scroll, page or grid.
+* **Page busyness** remains above illustration-based apps. Six attempts; see Addendum 7. Accepted
+  rather than solved, with softened outlines taking the edge off.
+* **The texture→flatten calibration** is still fitted to a handful of images.
+
+## Next: Phase 1
+
+The pipeline is producing output worth building an app around. The natural next steps are the
+conversion service (FastAPI plus a job queue around this pipeline, artifact storage, async status)
+and then the Flutter canvas prototype, whose gate is 60fps on a low-end physical Android device.
+
+The artifact contract already exists and is the seam between them, which is what Phase 1 should be
+built against.

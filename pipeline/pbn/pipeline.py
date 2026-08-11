@@ -133,6 +133,14 @@ VARIANTS: dict[str, Variant] = {
 }
 DEFAULT_VARIANTS = ("simple", "standard", "detailed")
 
+# The variant the app should preselect. Chosen by the reviewer after comparing all three on real
+# camera-roll photos: it carries the most regions and the deepest palette the content supports, and
+# the finished artwork is what the user keeps.
+#
+# The others stay offered rather than being removed — the picker exists so the user decides, and it
+# also converts an imperfect conversion from a gamble into a choice they own.
+RECOMMENDED_VARIANT = "detailed"
+
 
 @dataclass
 class Conversion:
