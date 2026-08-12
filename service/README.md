@@ -56,6 +56,12 @@ client re-opening an artwork should not re-download its region map.
 **Per-variant progress is persisted as it completes**, so a polling client can start on the first
 variant instead of waiting for all three.
 
+**The recommended variant is converted first** (`CONVERSION_ORDER` in `jobs.py`). This is a
+user-visible latency decision, not tidying: each variant is roughly a third of the job, and the app
+opens the recommended one, so producing it last made every user wait for two variants they were not
+about to paint. The app polls for that variant appearing rather than for the job to finish, which
+cuts the perceived wait to about a third while the alternatives finish in the background.
+
 **The segmentation extra is a hard dependency.** Without `rembg` the pipeline silently falls back to
 whole-frame treatment and produces visibly worse artwork than the version that was reviewed and
 accepted. Silent quality regressions are worse than missing dependencies.

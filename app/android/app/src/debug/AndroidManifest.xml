@@ -4,4 +4,10 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- The local conversion service is plain HTTP on 10.0.2.2 (emulator) or a reversed port
+         (device). Android blocks cleartext by default since API 28, which surfaces as an opaque
+         connection failure rather than a permissions error. Debug-only on purpose: the release
+         build keeps cleartext blocked, since production will be HTTPS. -->
+    <application android:usesCleartextTraffic="true" />
 </manifest>

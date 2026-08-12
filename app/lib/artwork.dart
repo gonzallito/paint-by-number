@@ -1,9 +1,52 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart';
+
+/// Where an artifact bundle's bytes come from.
+///
+/// Exists because a bundle now arrives two ways: compiled in as an asset (the benchmark sample)
+/// or downloaded from the conversion service into the app's documents directory (every real
+/// artwork). Loading is identical in both cases, so only byte access is abstracted.
+abstract class BundleSource {
+  Future<Uint8List> read(String filename);
+
+  /// Identifies the bundle for caching and progress storage.
+  String get key;
+}
+
+class AssetBundleSource implements BundleSource {
+  const AssetBundleSource(this.directory);
+
+  /// An asset path such as `assets/artwork/martim`.
+  final String directory;
+
+  @override
+  String get key => directory;
+
+  @override
+  Future<Uint8List> read(String filename) async {
+    final data = await rootBundle.load('$directory/$filename');
+    return data.buffer.asUint8List();
+  }
+}
+
+class DirectoryBundleSource implements BundleSource {
+  const DirectoryBundleSource(this.directory);
+
+  final Directory directory;
+
+  @override
+  String get key => directory.path;
+
+  @override
+  Future<Uint8List> read(String filename) {
+    return File('${directory.path}/$filename').readAsBytes();
+  }
+}
 
 /// One palette entry, as presented in the tray.
 class PaletteColour {
@@ -146,17 +189,17 @@ class Artwork {
     return count;
   }
 
-  /// Load a bundle from bundled assets. [directory] is an asset path such as
-  /// `assets/artwork/martim`.
-  static Future<Artwork> load(String directory) async {
-    final metaJson = await rootBundle.loadString('$directory/meta.json');
+  /// Load a bundle from any source. Only `regions.png` and `meta.json` are read —
+  /// `display.png` is never needed, which is what lets the service skip writing it.
+  static Future<Artwork> load(BundleSource source) async {
+    final metaJson = utf8.decode(await source.read('meta.json'));
     final meta = jsonDecode(metaJson) as Map<String, dynamic>;
 
     final canvas = meta['canvas'] as Map<String, dynamic>;
     final width = canvas['width'] as int;
     final height = canvas['height'] as int;
 
-    final regionIds = await _decodeRegionMap('$directory/regions.png', width, height);
+    final regionIds = await _decodeRegionMap(source, width, height);
 
     final regionList = (meta['regions'] as List).cast<Map<String, dynamic>>();
     final regions = regionList.map((entry) {
@@ -206,16 +249,20 @@ class Artwork {
   /// The encoding is `id = r + g*256 + b*65536`, little-endian by channel, which keeps
   /// green and blue near zero for the region counts we produce and so compresses well —
   /// this file is 372KB where the display image is 3.4MB.
-  static Future<Uint16List> _decodeRegionMap(String asset, int width, int height) async {
-    final data = await rootBundle.load(asset);
-    final codec = await ui.instantiateImageCodec(data.buffer.asUint8List());
+  static Future<Uint16List> _decodeRegionMap(
+    BundleSource source,
+    int width,
+    int height,
+  ) async {
+    final bytes = await source.read('regions.png');
+    final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
     final image = frame.image;
 
     final raw = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
     image.dispose();
     if (raw == null) {
-      throw StateError('could not read pixels from $asset');
+      throw StateError('could not read pixels from ${source.key}/regions.png');
     }
 
     final bytes = raw.buffer.asUint8List();

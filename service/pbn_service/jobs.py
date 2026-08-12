@@ -36,6 +36,16 @@ DEFAULT_WORKERS = 2
 # conversion from a gamble into a choice they own.
 VARIANTS = pipeline.DEFAULT_VARIANTS
 
+# Conversion order, recommended variant FIRST.
+#
+# This is a user-visible latency decision, not tidying. Each variant costs roughly a third of the
+# job, and the client opens the recommended one — so producing it last made every user wait for two
+# variants they were not about to paint. Recommended-first lets the app open the artwork after about
+# a third of the total wait, while the alternatives finish in the background.
+CONVERSION_ORDER = tuple(
+    sorted(VARIANTS, key=lambda name: name != pipeline.RECOMMENDED_VARIANT)
+)
+
 # display.png is NOT written. The canvas prototype proved the app never reads it — it derives
 # outlines from the region map at load — and dropping it takes a bundle from 4.1MB to 760KB, a 5.5x
 # saving in storage and download per artwork.
@@ -108,7 +118,7 @@ class JobRunner:
                 raise FileNotFoundError("upload missing")
 
             source = images.load(upload)
-            for name in VARIANTS:
+            for name in CONVERSION_ORDER:
                 variant = pipeline.VARIANTS[name]
                 started = time.perf_counter()
                 conversion = pipeline.convert(source, variant)

@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required in the main manifest, not just the debug one: the app uploads photos to the
+         conversion service, so release builds need this as well. Flutter's generated debug
+         manifest grants it only for the tooling's own hot-reload channel. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="paint_by_number"
         android:name="${applicationName}"
