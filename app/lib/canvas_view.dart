@@ -48,9 +48,16 @@ class _CanvasViewState extends State<CanvasView> {
   final TransformationController _controller = TransformationController();
 
   /// Fill layer: transparent where unfilled, palette colour where filled. Held as a CPU
-  /// buffer and re-uploaded after each fill.
+  /// buffer so patches can be collapsed into a single upload periodically.
   late Uint32List _fillPixels;
   ui.Image? _fillImage;
+
+  /// Fills uploaded since the last collapse, each a small image over its own region.
+  final List<_FillPatch> _patches = <_FillPatch>[];
+
+  /// Collapse threshold. Low enough that per-frame draw calls stay trivial, high enough that
+  /// a full-canvas upload is rare.
+  static const int _maxPatches = 32;
 
   /// Grey/white pattern over the selected colour's unfilled regions.
   ui.Image? _highlightImage;
@@ -78,6 +85,9 @@ class _CanvasViewState extends State<CanvasView> {
     _controller.dispose();
     _fillImage?.dispose();
     _highlightImage?.dispose();
+    for (final patch in _patches) {
+      patch.image.dispose();
+    }
     super.dispose();
   }
 
@@ -133,13 +143,15 @@ class _CanvasViewState extends State<CanvasView> {
 
     final watch = Stopwatch()..start();
     widget.artwork.fill(regionId, selected.number);
+    // Written into the base buffer as well as uploaded as a patch, so a later collapse only
+    // needs to decode the base rather than replay every patch.
     _paintRegion(_fillPixels, regionId, selected.rgbaWord);
-    await _uploadFillLayer();
-    // The highlight shows only *unfilled* regions of this colour, so it is now stale by
-    // exactly the region just filled.
-    await _rebuildHighlight(force: true);
+    await _addFillPatch(regionId, selected.rgbaWord);
     watch.stop();
 
+    // The highlight is deliberately NOT rebuilt here. It is drawn *under* the fill layer, so
+    // the colour just laid down covers its own highlight exactly. An earlier version rebuilt
+    // it on every tap and that alone accounted for 119ms of a measured 174ms tap latency.
     widget.stats.lastFillMillis = watch.elapsedMilliseconds;
     widget.onRegionFilled(regionId, true);
   }
@@ -161,7 +173,49 @@ class _CanvasViewState extends State<CanvasView> {
     }
   }
 
-  Future<void> _uploadFillLayer() async {
+  /// Upload just the filled region as a small image, positioned over the canvas.
+  ///
+  /// Re-uploading the whole 1800x2400 buffer per tap meant pushing ~17MB to the GPU for a
+  /// region occupying a few thousand pixels, and measured 174ms of tap latency. A patch is
+  /// proportional to the region instead.
+  ///
+  /// Patches accumulate until [_maxPatches], then collapse into one full-canvas upload. That
+  /// bounds both per-tap cost and the number of draw calls per frame — without a collapse,
+  /// a finished artwork would be over a thousand separate images.
+  Future<void> _addFillPatch(int regionId, int rgbaWord) async {
+    final artwork = widget.artwork;
+    final (minX, minY, maxX, maxY) = artwork.boundsOf(regionId);
+    final patchWidth = maxX - minX + 1;
+    final patchHeight = maxY - minY + 1;
+
+    final pixels = Uint32List(patchWidth * patchHeight);
+    for (var y = minY; y <= maxY; y++) {
+      final sourceRow = y * artwork.width;
+      final targetRow = (y - minY) * patchWidth;
+      for (var x = minX; x <= maxX; x++) {
+        if (artwork.regionIds[sourceRow + x] == regionId) {
+          pixels[targetRow + (x - minX)] = rgbaWord;
+        }
+      }
+    }
+
+    final image = await _decodeSized(pixels, patchWidth, patchHeight);
+    if (!mounted) {
+      image.dispose();
+      return;
+    }
+
+    setState(() {
+      _patches.add(_FillPatch(image, Offset(minX.toDouble(), minY.toDouble())));
+    });
+
+    if (_patches.length >= _maxPatches) {
+      await _collapsePatches();
+    }
+  }
+
+  /// Fold accumulated patches into a single full-canvas image.
+  Future<void> _collapsePatches() async {
     final image = await _decode(_fillPixels);
     if (!mounted) {
       image.dispose();
@@ -170,6 +224,10 @@ class _CanvasViewState extends State<CanvasView> {
     setState(() {
       _fillImage?.dispose();
       _fillImage = image;
+      for (final patch in _patches) {
+        patch.image.dispose();
+      }
+      _patches.clear();
     });
   }
 
@@ -232,12 +290,15 @@ class _CanvasViewState extends State<CanvasView> {
     }
   }
 
-  Future<ui.Image> _decode(Uint32List pixels) {
+  Future<ui.Image> _decode(Uint32List pixels) =>
+      _decodeSized(pixels, widget.artwork.width, widget.artwork.height);
+
+  Future<ui.Image> _decodeSized(Uint32List pixels, int width, int height) {
     final completer = Completer<ui.Image>();
     ui.decodeImageFromPixels(
       pixels.buffer.asUint8List(),
-      widget.artwork.width,
-      widget.artwork.height,
+      width,
+      height,
       ui.PixelFormat.rgba8888,
       completer.complete,
     );
@@ -283,6 +344,7 @@ class _CanvasViewState extends State<CanvasView> {
                       painter: _LayersPainter(
                         artwork: artwork,
                         fillImage: _fillImage,
+                        patches: _patches,
                         highlightImage: _highlightImage,
                       ),
                     ),
@@ -318,33 +380,48 @@ class _CanvasViewState extends State<CanvasView> {
   }
 }
 
+/// One uploaded fill, small enough to cover only its own region.
+class _FillPatch {
+  const _FillPatch(this.image, this.offset);
+  final ui.Image image;
+  final Offset offset;
+}
+
 /// Artwork layers, painted in canvas coordinates inside the transformed subtree.
 class _LayersPainter extends CustomPainter {
   _LayersPainter({
     required this.artwork,
     required this.fillImage,
+    required this.patches,
     required this.highlightImage,
   });
 
   final Artwork artwork;
   final ui.Image? fillImage;
+  final List<_FillPatch> patches;
   final ui.Image? highlightImage;
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..filterQuality = FilterQuality.low;
 
-    // Order matters. Fills sit under the outlines so lines stay visible; the highlight
-    // sits above the fills but under the lines so it does not swallow them.
+    // Order matters, and this order is what removes the per-tap highlight rebuild: the
+    // highlight goes down FIRST, so a fill drawn over it covers its own highlight exactly and
+    // no stale highlight can show through. Outlines go last so lines always stay visible.
     canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFFFFFFFF));
-    if (fillImage != null) canvas.drawImage(fillImage!, Offset.zero, paint);
     if (highlightImage != null) canvas.drawImage(highlightImage!, Offset.zero, paint);
+    if (fillImage != null) canvas.drawImage(fillImage!, Offset.zero, paint);
+    for (final patch in patches) {
+      canvas.drawImage(patch.image, patch.offset, paint);
+    }
     canvas.drawImage(artwork.outlineImage, Offset.zero, paint);
   }
 
   @override
   bool shouldRepaint(_LayersPainter old) =>
-      old.fillImage != fillImage || old.highlightImage != highlightImage;
+      old.fillImage != fillImage ||
+      old.highlightImage != highlightImage ||
+      old.patches.length != patches.length;
 }
 
 /// Region numbers, painted in screen coordinates at constant size.

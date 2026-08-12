@@ -122,6 +122,7 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
               stats: _stats,
               frames: _frames,
               loadMillis: _loadMillis,
+              onReset: () => setState(_frames.reset),
             ),
             Expanded(
               child: CanvasView(
@@ -144,18 +145,25 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
 }
 
 /// Samples frame timings from the scheduler so the gate can be answered with data.
+///
+/// Reports **percentiles, not a worst value**. A single worst figure was actively misleading:
+/// the sample window includes app startup, whose first frame is always enormous, so it read
+/// 1837ms and said nothing about interaction. p50 and p95 describe the experience; [reset]
+/// exists so a specific interaction can be measured without startup in the sample at all.
 class _FrameMonitor {
-  static const int _window = 120;
+  static const int _window = 240;
   final List<double> _buildMs = <double>[];
   final List<double> _rasterMs = <double>[];
 
-  void start() {
-    SchedulerBinding.instance.addTimingsCallback(_onTimings);
+  void start() => SchedulerBinding.instance.addTimingsCallback(_onTimings);
+  void stop() => SchedulerBinding.instance.removeTimingsCallback(_onTimings);
+
+  void reset() {
+    _buildMs.clear();
+    _rasterMs.clear();
   }
 
-  void stop() {
-    SchedulerBinding.instance.removeTimingsCallback(_onTimings);
-  }
+  int get sampleCount => _buildMs.length;
 
   void _onTimings(List<FrameTiming> timings) {
     for (final timing in timings) {
@@ -168,10 +176,19 @@ class _FrameMonitor {
     }
   }
 
-  double get worstBuild => _buildMs.isEmpty ? 0 : _buildMs.reduce((a, b) => a > b ? a : b);
-  double get worstRaster => _rasterMs.isEmpty ? 0 : _rasterMs.reduce((a, b) => a > b ? a : b);
+  static double _percentile(List<double> values, double fraction) {
+    if (values.isEmpty) return 0;
+    final sorted = List<double>.of(values)..sort();
+    final index = ((sorted.length - 1) * fraction).round();
+    return sorted[index];
+  }
 
-  /// Share of recent frames that missed the 16ms budget. This is the gate.
+  double get buildP50 => _percentile(_buildMs, 0.50);
+  double get buildP95 => _percentile(_buildMs, 0.95);
+  double get rasterP50 => _percentile(_rasterMs, 0.50);
+  double get rasterP95 => _percentile(_rasterMs, 0.95);
+
+  /// Share of sampled frames that missed the 16ms budget. This is the gate.
   double get jankPercent {
     if (_buildMs.isEmpty) return 0;
     var over = 0;
@@ -188,12 +205,14 @@ class _StatsStrip extends StatelessWidget {
     required this.stats,
     required this.frames,
     required this.loadMillis,
+    required this.onReset,
   });
 
   final Artwork artwork;
   final CanvasStats stats;
   final _FrameMonitor frames;
   final int loadMillis;
+  final VoidCallback onReset;
 
   @override
   Widget build(BuildContext context) {
@@ -209,25 +228,44 @@ class _StatsStrip extends StatelessWidget {
           fontSize: 11,
           fontFamily: 'monospace',
         ),
-        child: Column(
+        child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '$filled/$total filled   ${artwork.palette.length} colours   '
-              'load ${loadMillis}ms',
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$filled/$total filled   ${artwork.palette.length} colours   '
+                    'load ${loadMillis}ms',
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'zoom ${stats.zoom.toStringAsFixed(2)}x   '
+                    'numbers ${stats.visibleNumbers}   '
+                    'fill ${stats.lastFillMillis}ms   '
+                    'highlight ${stats.lastHighlightMillis}ms',
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'build p50 ${frames.buildP50.toStringAsFixed(1)} '
+                    'p95 ${frames.buildP95.toStringAsFixed(1)}ms   '
+                    'raster p50 ${frames.rasterP50.toStringAsFixed(1)} '
+                    'p95 ${frames.rasterP95.toStringAsFixed(1)}ms',
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'over 16ms ${frames.jankPercent.toStringAsFixed(0)}%   '
+                    'frames ${frames.sampleCount}',
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 2),
-            Text(
-              'zoom ${stats.zoom.toStringAsFixed(2)}x   '
-              'numbers ${stats.visibleNumbers}   '
-              'fill ${stats.lastFillMillis}ms   '
-              'highlight ${stats.lastHighlightMillis}ms',
-            ),
-            const SizedBox(height: 2),
-            Text(
-              'worst build ${frames.worstBuild.toStringAsFixed(1)}ms   '
-              'worst raster ${frames.worstRaster.toStringAsFixed(1)}ms   '
-              'over 16ms ${frames.jankPercent.toStringAsFixed(0)}%',
+            // Reset, then perform one interaction, then read. Startup frames otherwise
+            // dominate every percentile and make the numbers meaningless.
+            TextButton(
+              onPressed: onReset,
+              child: const Text('reset', style: TextStyle(fontSize: 11)),
             ),
           ],
         ),
