@@ -299,8 +299,9 @@ class ServiceUnreachableException extends ConversionException {
 
 String _describeUnreachable(String baseUrl) =>
     'Could not reach the conversion service at $baseUrl.\n\n'
-    'Check that it is running, and that it is bound to all interfaces rather than to '
-    'loopback — an emulator cannot see a loopback-only server.\n\n'
-    'An emulator reaches your computer at 10.0.2.2, never localhost: inside the emulator, '
-    'localhost is the emulated device itself. On a USB-connected device, run '
-    'adb reverse tcp:8000 tcp:8000 and use localhost.';
+    'Check that it is running on your computer.\n\n'
+    'From an emulator the host is 10.0.2.2, never localhost — inside the emulator, localhost is '
+    'the emulated device itself. 10.0.2.2 is an alias for the host loopback, so a service bound '
+    'to 127.0.0.1 is fine.\n\n'
+    'On a real device, either run adb reverse tcp:8000 tcp:8000 over USB, or bind the service to '
+    '0.0.0.0 and point PBN_SERVICE_URL at your computer\'s LAN address.';
