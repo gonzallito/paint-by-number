@@ -1,0 +1,54 @@
+[project]
+name = "pbn-service"
+version = "0.1.0"
+description = "Conversion service wrapping the paint-by-number pipeline"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # The segmentation extra is required, not optional, here. Without rembg the pipeline silently
+    # falls back to whole-frame treatment, so the service would produce visibly worse artwork than
+    # the version that was reviewed and accepted.
+    "pbn-pipeline[segmentation]",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "pytest>=8.3",
+    "ruff>=0.7",
+]
+
+# The pipeline is consumed from the repository rather than an index. Same code the spike validated,
+# no packaging step in the loop.
+[tool.uv.sources]
+pbn-pipeline = { path = "../pipeline", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pbn_service"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# FastAPI declares parameter metadata by calling File()/Query()/etc. in argument defaults, which
+# bugbear's B008 flags as a mutable-default risk. It is the framework's intended idiom, so the
+# calls are declared immutable rather than the code contorted to avoid them.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Path",
+    "fastapi.Query",
+]
