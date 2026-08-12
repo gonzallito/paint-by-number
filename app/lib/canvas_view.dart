@@ -59,8 +59,15 @@ class _CanvasViewState extends State<CanvasView> {
   /// a full-canvas upload is rare.
   static const int _maxPatches = 32;
 
-  /// Grey/white pattern over the selected colour's unfilled regions.
-  ui.Image? _highlightImage;
+  /// Bumped on every change to the layers. The patch lists are mutated in place, so the painter
+  /// would otherwise be comparing a list against itself and could miss a change that happens to
+  /// preserve the length — switching between two colours owning the same number of regions, for
+  /// instance. Comparing an integer is both correct and cheaper than comparing contents.
+  int _revision = 0;
+
+  /// Grey/white pattern over the selected colour's unfilled regions, as one small patch per
+  /// region rather than a full-canvas image.
+  final List<_FillPatch> _highlightPatches = <_FillPatch>[];
   int? _highlightedColour;
 
   Size _viewport = Size.zero;
@@ -84,10 +91,10 @@ class _CanvasViewState extends State<CanvasView> {
   void dispose() {
     _controller.dispose();
     _fillImage?.dispose();
-    _highlightImage?.dispose();
     for (final patch in _patches) {
       patch.image.dispose();
     }
+    _disposeHighlight();
     super.dispose();
   }
 
@@ -207,6 +214,7 @@ class _CanvasViewState extends State<CanvasView> {
 
     setState(() {
       _patches.add(_FillPatch(image, Offset(minX.toDouble(), minY.toDouble())));
+      _revision++;
     });
 
     if (_patches.length >= _maxPatches) {
@@ -228,50 +236,71 @@ class _CanvasViewState extends State<CanvasView> {
         patch.image.dispose();
       }
       _patches.clear();
+      _revision++;
     });
+  }
+
+  void _disposeHighlight() {
+    for (final patch in _highlightPatches) {
+      patch.image.dispose();
+    }
+    _highlightPatches.clear();
   }
 
   /// Build the grey/white pattern over unfilled regions of the selected colour.
   ///
-  /// Not decoration: with ~88 colours each one owns only a handful of regions, so "where
-  /// does colour 43 go?" is genuinely hard to answer by eye without it.
+  /// Not decoration: with ~88 colours each one owns only a handful of regions, so "where does
+  /// colour 43 go?" is genuinely hard to answer by eye without it.
+  ///
+  /// Built as one small patch per region rather than a full-canvas image. A colour owns roughly
+  /// 14 of 1,266 regions, so a full-canvas decode was doing ~90x more work than needed and cost
+  /// a measured 116ms on every swatch tap — a frequent action, since a palette this size is
+  /// worked through colour by colour.
   Future<void> _rebuildHighlight({bool force = false}) async {
     final selected = widget.selectedColour;
     if (!force && selected?.number == _highlightedColour) return;
     _highlightedColour = selected?.number;
 
     if (selected == null) {
-      if (mounted) setState(() => _highlightImage = null);
+      if (mounted) {
+        setState(() {
+          _disposeHighlight();
+          _revision++;
+        });
+      }
       return;
     }
 
     final watch = Stopwatch()..start();
     final artwork = widget.artwork;
-    final pixels = Uint32List(artwork.width * artwork.height);
+    final built = <_FillPatch>[];
 
     // Only this colour's regions are visited, via the artifact's regions_by_colour index —
     // never a scan of the whole map.
     for (final id in selected.regionIds) {
       if (artwork.isFilled(id)) continue;
-      _paintRegionCheckered(pixels, id);
+      final patch = await _buildCheckeredPatch(id);
+      built.add(patch);
     }
-
-    final image = await _decode(pixels);
     watch.stop();
+
     if (!mounted) {
-      image.dispose();
+      for (final patch in built) {
+        patch.image.dispose();
+      }
       return;
     }
     setState(() {
-      _highlightImage?.dispose();
-      _highlightImage = image;
+      _disposeHighlight();
+      _highlightPatches.addAll(built);
       widget.stats.lastHighlightMillis = watch.elapsedMilliseconds;
+      _revision++;
     });
   }
 
-  /// Checkerboard within a region, so a highlighted area reads as "to do" rather than as
-  /// colour already laid down.
-  void _paintRegionCheckered(Uint32List target, int regionId) {
+  /// A checkerboard patch covering one region, so it reads as "to do" rather than as colour
+  /// already laid down.
+  Future<_FillPatch> _buildCheckeredPatch(int regionId) async {
     // Greys, so channel order does not matter for these words.
     const light = 0xFFF2F2F2;
     const dark = 0xFF9A9A9A;
@@ -279,15 +308,25 @@ class _CanvasViewState extends State<CanvasView> {
 
     final artwork = widget.artwork;
     final (minX, minY, maxX, maxY) = artwork.boundsOf(regionId);
+    final width = maxX - minX + 1;
+    final height = maxY - minY + 1;
+    final pixels = Uint32List(width * height);
+
     for (var y = minY; y <= maxY; y++) {
-      final row = y * artwork.width;
+      final sourceRow = y * artwork.width;
+      final targetRow = (y - minY) * width;
+      // Checker phase is computed from absolute coordinates, so the pattern stays continuous
+      // across neighbouring regions instead of restarting at each patch.
       final band = (y ~/ cell) & 1;
       for (var x = minX; x <= maxX; x++) {
-        if (artwork.regionIds[row + x] != regionId) continue;
+        if (artwork.regionIds[sourceRow + x] != regionId) continue;
         final checker = ((x ~/ cell) & 1) ^ band;
-        target[row + x] = checker == 0 ? light : dark;
+        pixels[targetRow + (x - minX)] = checker == 0 ? light : dark;
       }
     }
+
+    final image = await _decodeSized(pixels, width, height);
+    return _FillPatch(image, Offset(minX.toDouble(), minY.toDouble()));
   }
 
   Future<ui.Image> _decode(Uint32List pixels) =>
@@ -345,7 +384,8 @@ class _CanvasViewState extends State<CanvasView> {
                         artwork: artwork,
                         fillImage: _fillImage,
                         patches: _patches,
-                        highlightImage: _highlightImage,
+                        highlightPatches: _highlightPatches,
+                        revision: _revision,
                       ),
                     ),
                   ),
@@ -364,6 +404,7 @@ class _CanvasViewState extends State<CanvasView> {
                             artwork: artwork,
                             transform: _controller.value,
                             zoom: _zoom,
+                            revision: _revision,
                             stats: widget.stats,
                           ),
                         );
@@ -393,13 +434,17 @@ class _LayersPainter extends CustomPainter {
     required this.artwork,
     required this.fillImage,
     required this.patches,
-    required this.highlightImage,
+    required this.highlightPatches,
+    required this.revision,
   });
 
   final Artwork artwork;
   final ui.Image? fillImage;
   final List<_FillPatch> patches;
-  final ui.Image? highlightImage;
+  final List<_FillPatch> highlightPatches;
+
+  /// Monotonic counter identifying the layer state; see _CanvasViewState._revision.
+  final int revision;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -409,7 +454,9 @@ class _LayersPainter extends CustomPainter {
     // highlight goes down FIRST, so a fill drawn over it covers its own highlight exactly and
     // no stale highlight can show through. Outlines go last so lines always stay visible.
     canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFFFFFFFF));
-    if (highlightImage != null) canvas.drawImage(highlightImage!, Offset.zero, paint);
+    for (final patch in highlightPatches) {
+      canvas.drawImage(patch.image, patch.offset, paint);
+    }
     if (fillImage != null) canvas.drawImage(fillImage!, Offset.zero, paint);
     for (final patch in patches) {
       canvas.drawImage(patch.image, patch.offset, paint);
@@ -418,10 +465,7 @@ class _LayersPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_LayersPainter old) =>
-      old.fillImage != fillImage ||
-      old.highlightImage != highlightImage ||
-      old.patches.length != patches.length;
+  bool shouldRepaint(_LayersPainter old) => old.revision != revision;
 }
 
 /// Region numbers, painted in screen coordinates at constant size.
@@ -430,12 +474,17 @@ class _NumbersPainter extends CustomPainter {
     required this.artwork,
     required this.transform,
     required this.zoom,
+    required this.revision,
     required this.stats,
   });
 
   final Artwork artwork;
   final Matrix4 transform;
   final double zoom;
+
+  /// Needed because a filled region's number is dropped. Without this the label would linger
+  /// until the next pan or zoom happened to trigger a repaint.
+  final int revision;
   final CanvasStats stats;
 
   static const TextStyle _style = TextStyle(
@@ -481,5 +530,5 @@ class _NumbersPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_NumbersPainter old) =>
-      old.transform != transform || old.zoom != zoom;
+      old.transform != transform || old.zoom != zoom || old.revision != revision;
 }
