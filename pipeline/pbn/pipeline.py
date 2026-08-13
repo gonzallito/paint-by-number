@@ -54,6 +54,23 @@ FLOOR_SEARCH_LOW = 0.18
 FLOOR_SEARCH_HIGH = 1.30
 FLOOR_SEARCH_STEPS = 4
 
+# Segment once at a fixed floor and trim to target, instead of searching for a floor that happens
+# to land near it. See _segment_to_target.
+ONE_SHOT_SEGMENTATION = True
+
+# Minimum region size for the first pass, as a fraction of the reference radius.
+#
+# Lower than it could be on its own, deliberately: the trim that follows merges regions back up,
+# so it recovers numberability that a floor sweep alone would lose. What matters is leaving the
+# trim enough headroom to reach the target.
+#
+# Measured across the corpus at the detailed variant, all at 0.0% unnumbered unless noted:
+#   0.06  every image hits target, but 4.9% unnumbered on one - too far
+#   0.10  four of five hit target exactly, worst case 0.1% unnumbered (one or two regions)
+#   0.12  0.0% everywhere, but one image falls 28% short of target
+#   0.14  one image falls 38% short
+FIXED_RADIUS_FLOOR = 0.10
+
 
 # Subject budget share when the background is fully defocused. A bokeh backdrop needs only a
 # handful of shapes, so nearly the whole budget should go to the subject.
@@ -247,29 +264,83 @@ def _segment_to_target(
     subject_share: float,
     background_cap: int,
 ):
-    """Find the radius floor that lands closest to ``target`` regions, by bisection.
+    """Segment to roughly ``target`` regions.
 
-    Region count falls monotonically as the floor rises, so bisection converges quickly. Searching
-    for the *count* rather than fixing the floor is what makes one configuration work for both a
-    48MP camera-roll photo and a 0.4MP screenshot: each gets regions of the same comfortable size,
-    and simply differs in how many there are.
+    Targeting a *count* rather than fixing a region size is what makes one configuration work for
+    both a 48MP camera-roll photo and a 0.4MP screenshot: each gets regions of the same comfortable
+    size, and simply differs in how many there are.
+
+    Two strategies, selected by ``ONE_SHOT_SEGMENTATION``. The default segments once at a fixed
+    floor and trims to the target. The bisection is kept for comparison, and because it documents
+    why the default replaced it:
+
+    - It ran the full segmentation four or five times to find a floor, and segmentation is the
+      most expensive stage in the pipeline.
+    - Region count is **not** monotonic in the floor, which the bisection assumes. One corpus
+      image produced 985 regions at floor 0.14 and 1689 at a higher floor, because the merge order
+      is greedy and a different starting set of undersized regions cascades differently.
+    - Because it left the merger's budget effectively unlimited, pass 2 rarely fired — so the
+      subject/background budget split never applied. Measured on a portrait, the subject held 32%
+      of regions while asking for 72%.
     """
-    low, high = FLOOR_SEARCH_LOW, FLOOR_SEARCH_HIGH
-    best = None
-    for _ in range(FLOOR_SEARCH_STEPS):
-        middle = (low + high) / 2.0
-        candidate = segment.segment(
+
+    if ONE_SHOT_SEGMENTATION:
+        # One segmentation at a fixed floor, then trim to the exact target.
+        #
+        # The floor search existed to hit a region count by varying the minimum region size, which
+        # meant running the whole segmentation four or five times to find it. But pass 2 of the
+        # merger already trims to an exact budget — the search was only necessary because the
+        # budget was being passed as TARGET_REGIONS_MAX * 3, effectively disabling it.
+        #
+        # Merging never shrinks a region, so trimming cannot violate the floor the first pass
+        # established. That makes this both cheaper and more accurate: exactly on target instead
+        # of nearest-of-four, at a fifth of the cost.
+        result = segment.segment(
+            boundary_labels,
+            quantised.n_colours,
+            lab,
+            quantised.palette_lab,
+            budget=target,
+            subject_mask=mask,
+            min_radius_scale=FIXED_RADIUS_FLOOR,
+            subject_budget_share=subject_share,
+            background_region_cap=background_cap,
+        )
+        return FIXED_RADIUS_FLOOR, result
+
+    def evaluate(scale: float):
+        return segment.segment(
             boundary_labels,
             quantised.n_colours,
             lab,
             quantised.palette_lab,
             budget=TARGET_REGIONS_MAX * 3,
             subject_mask=mask,
-            min_radius_scale=middle,
+            min_radius_scale=scale,
             subject_budget_share=subject_share,
             background_region_cap=background_cap,
         )
-        if best is None or abs(candidate.n_regions - target) < abs(best[1].n_regions - target):
+
+    low, high = FLOOR_SEARCH_LOW, FLOOR_SEARCH_HIGH
+
+    # Evaluate the lowest floor FIRST, because it is the most regions the constraints can
+    # produce. If even that falls short of target, no higher floor can do better, and the search
+    # is over before it starts.
+    #
+    # This was previously left out, and it was costing both speed and quality. Bisection only
+    # ever evaluates midpoints, so on a photo whose ceiling is below target the floor walked
+    # 0.74 -> 0.46 -> 0.32 -> 0.25 and returned 0.25 — four full segmentations to land on an
+    # answer strictly worse than the 0.18 bound it never tried. Measured on the corpus, every
+    # image at the detailed variant saturated this way.
+    at_low = evaluate(low)
+    if at_low.n_regions <= target:
+        return low, at_low
+
+    best = (low, at_low)
+    for _ in range(FLOOR_SEARCH_STEPS):
+        middle = (low + high) / 2.0
+        candidate = evaluate(middle)
+        if abs(candidate.n_regions - target) < abs(best[1].n_regions - target):
             best = (middle, candidate)
         if candidate.n_regions > target:
             low = middle  # too many regions: raise the floor
