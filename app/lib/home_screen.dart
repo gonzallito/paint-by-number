@@ -106,11 +106,39 @@ class _HomeScreenState extends State<HomeScreen> {
       await _open(entry);
     } catch (error) {
       if (!mounted) return;
+      final message = _explain(error);
       setState(() {
         _progress = null;
-        _error = _explain(error);
+        _error = message;
       });
+      // A dialog, not just the banner. A conversion can fail in under a second — an unsupported
+      // format fails immediately — and the banner was quiet enough that a fast failure looked
+      // like nothing happening at all.
+      await _showFailure(message);
     }
+  }
+
+  Future<void> _showFailure(String message) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E22),
+        title: const Text('Conversion failed'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            message,
+            style: const TextStyle(fontSize: 13, height: 1.4),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// ConversionException already carries a message written to be read by a person, including
