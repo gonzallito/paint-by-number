@@ -116,9 +116,12 @@ class _CanvasViewState extends State<CanvasView> {
     final scale = _fitScale;
     final dx = (_viewport.width - widget.artwork.width * scale) / 2;
     final dy = (_viewport.height - widget.artwork.height * scale) / 2;
+    // translate/scale are deprecated in vector_math 2.4. These are the exact calls the old
+    // ones delegated to: translate(dx, dy) meant (dx, dy, 0, 1), and scale(s) with a single
+    // double meant (s, s, s, 1).
     _controller.value = Matrix4.identity()
-      ..translate(dx, dy)
-      ..scale(scale);
+      ..translateByDouble(dx, dy, 0.0, 1.0)
+      ..scaleByDouble(scale, scale, scale, 1.0);
   }
 
   Future<void> _onTapUp(TapUpDetails details) async {

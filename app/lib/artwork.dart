@@ -114,9 +114,8 @@ class Artwork {
     required this.regions,
     required this.palette,
     required this.outlineImage,
-    required Uint32List regionBounds,
-  }) : _regionBounds = regionBounds,
-       _filledColour = Uint8List(regions.length);
+    required this._regionBounds,
+  }) : _filledColour = Uint8List(regions.length);
 
   final int width;
   final int height;
@@ -254,8 +253,8 @@ class Artwork {
     int width,
     int height,
   ) async {
-    final bytes = await source.read('regions.png');
-    final codec = await ui.instantiateImageCodec(bytes);
+    final encoded = await source.read('regions.png');
+    final codec = await ui.instantiateImageCodec(encoded);
     final frame = await codec.getNextFrame();
     final image = frame.image;
 
