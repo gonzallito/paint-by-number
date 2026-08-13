@@ -63,6 +63,10 @@ _runner = JobRunner(_storage, workers=int(os.environ.get("PBN_WORKERS", "2")))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before serving anything, settle jobs the last process abandoned. Until this ran, a
+    # restart left "running" records on disk that no worker owned.
+    _runner.recover()
+
     # Load the subject-detection model before serving. On a fresh machine this downloads 176MB
     # of u2net weights, and if that happens inside the first conversion it looks exactly like a
     # hung job: no progress is reported for a model download. Done in a thread so the server

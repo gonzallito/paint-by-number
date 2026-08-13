@@ -66,6 +66,32 @@ class JobRunner:
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    def recover(self) -> int:
+        """Fail any job left mid-flight by a previous process. Returns how many.
+
+        The worker pool is in-process, so it does not survive a restart: a record still marked
+        "queued" or "running" at start-up has no worker and never will. Left alone these are
+        indistinguishable from live jobs, so a client polls them forever.
+
+        Marked failed rather than requeued, deliberately. The upload may be long gone, and a
+        client that is told the truth can retry — whereas silently restarting work the user may
+        have abandoned wastes a minute of CPU per record.
+        """
+        recovered = 0
+        for record in self.storage.all_jobs():
+            if record.get("status") in {"queued", "running"}:
+                record["status"] = "failed"
+                record["error"] = (
+                    "the conversion service restarted before this conversion finished; "
+                    "please upload the photo again"
+                )
+                record["finished_at"] = time.time()
+                self.storage.write_job(record)
+                recovered += 1
+        if recovered:
+            log.warning("failed %d job(s) abandoned by a previous process", recovered)
+        return recovered
+
     # --- submission ------------------------------------------------------------------
 
     def submit(self, data: bytes, filename: str, deduplicate: bool = True) -> dict:

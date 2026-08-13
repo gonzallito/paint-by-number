@@ -114,8 +114,16 @@ class Storage:
         return records
 
     def find_by_digest(self, digest: str) -> dict | None:
+        """An existing *finished* job for this content, or None.
+
+        Only succeeded jobs are reused. This used to reuse anything not marked failed, which
+        included jobs left "queued" or "running" by a server that stopped mid-conversion — and
+        because the worker pool lives inside the process, no worker exists to finish those after
+        a restart. Handing one back made every re-upload of that photo poll a job that could
+        never progress, with nothing in the log to say so.
+        """
         for record in self.all_jobs():
-            if record.get("digest") == digest and record.get("status") != "failed":
+            if record.get("digest") == digest and record.get("status") == "succeeded":
                 return record
         return None
 

@@ -55,6 +55,10 @@ class ConversionService {
   /// still running perfectly well on the server.
   static const int _maxPollFailures = 5;
 
+  /// How long a job may sit "queued" before we call it stuck. A free worker picks a job up
+  /// immediately, so more than this means none will.
+  static const Duration _queuedStallLimit = Duration(seconds: 90);
+
   /// Run a network call, converting transport failures into an explanation.
   ///
   /// This exists because `package:http` wraps socket errors in its own `ClientException`, so
@@ -123,6 +127,7 @@ class ConversionService {
   }) async {
     final deadline = DateTime.now().add(_timeout);
     var failures = 0;
+    DateTime? queuedSince;
 
     while (true) {
       final Map<String, dynamic> record;
@@ -161,6 +166,21 @@ class ConversionService {
         // Succeeded with no usable variant means the contract was broken, not that we
         // should keep polling forever.
         throw ConversionException('conversion produced no variants');
+      }
+
+      // A job that stays queued has no worker, and waiting longer will not produce one. Worth
+      // separating from a slow conversion because the causes are unrelated: a stuck queue is a
+      // server problem, while "running" and slow is just a big photo.
+      if (state == 'queued') {
+        queuedSince ??= DateTime.now();
+        if (DateTime.now().difference(queuedSince) > _queuedStallLimit) {
+          throw ConversionException(
+            'The service accepted the photo but never started converting it. '
+            'Its worker pool may be wedged — restart the service and try again.',
+          );
+        }
+      } else {
+        queuedSince = null;
       }
 
       onProgress?.call(
