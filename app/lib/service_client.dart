@@ -40,10 +40,13 @@ class ConversionService {
   /// on the server for no better answer.
   static const Duration _pollInterval = Duration(seconds: 2);
 
-  /// Upper bound on waiting. Generous, because a slow machine converting three variants of a
-  /// large photo is legitimately slow — but not unbounded, or a crashed worker hangs the UI
-  /// forever with no way out.
-  static const Duration _timeout = Duration(minutes: 6);
+  /// Upper bound on waiting.
+  ///
+  /// Was 6 minutes, which real hardware exceeded: a first conversion also downloads a 176MB
+  /// subject-detection model, and a modest laptop converting a 48MP photo is legitimately slow.
+  /// Giving up on work that was still progressing is the worse failure, so this is now generous
+  /// enough to only ever fire on a genuinely stuck worker.
+  static const Duration _timeout = Duration(minutes: 25);
 
   /// Consecutive poll failures tolerated before giving up.
   ///

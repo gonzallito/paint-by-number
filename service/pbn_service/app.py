@@ -16,15 +16,30 @@ Endpoints::
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from pbn import subject
 
 from pbn_service.jobs import VARIANTS, JobRunner
 from pbn_service.storage import Storage
+
+log = logging.getLogger("pbn.service")
+
+# Configure logging here rather than leaving it to the caller. Without a root handler, uvicorn
+# shows its own request lines and nothing from this package, which makes a slow conversion
+# indistinguishable from a hung one — the exact problem this logging exists to solve.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 # Reject oversized uploads before reading them into memory. 48MP phone photos land around 15-25MB,
 # so this leaves headroom without inviting someone to post a gigabyte.
@@ -48,6 +63,26 @@ _runner = JobRunner(_storage, workers=int(os.environ.get("PBN_WORKERS", "2")))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load the subject-detection model before serving. On a fresh machine this downloads 176MB
+    # of u2net weights, and if that happens inside the first conversion it looks exactly like a
+    # hung job: no progress is reported for a model download. Done in a thread so the server
+    # still answers /healthz while it runs.
+    def _warm() -> None:
+        started = time.perf_counter()
+        log.info("warming subject model (first run downloads ~176MB)")
+        try:
+            if subject.warm():
+                log.info("subject model ready in %.1fs", time.perf_counter() - started)
+            else:
+                # Not fatal, but it silently degrades every conversion, so say so loudly.
+                log.error(
+                    "SEGMENTATION EXTRA MISSING: conversions will run without subject "
+                    "detection and quality will be worse. Fix with: uv sync"
+                )
+        except Exception:
+            log.exception("subject model failed to load")
+
+    threading.Thread(target=_warm, name="warm-model", daemon=True).start()
     yield
     _runner.shutdown()
 

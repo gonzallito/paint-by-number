@@ -14,6 +14,7 @@ behind this interface.
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 import traceback
 import uuid
@@ -25,6 +26,8 @@ from typing import Literal
 from pbn import artifact, images, pipeline, render
 
 from pbn_service.storage import Storage
+
+log = logging.getLogger("pbn.jobs")
 
 Status = Literal["queued", "running", "succeeded", "failed"]
 
@@ -42,9 +45,7 @@ VARIANTS = pipeline.DEFAULT_VARIANTS
 # job, and the client opens the recommended one — so producing it last made every user wait for two
 # variants they were not about to paint. Recommended-first lets the app open the artwork after about
 # a third of the total wait, while the alternatives finish in the background.
-CONVERSION_ORDER = tuple(
-    sorted(VARIANTS, key=lambda name: name != pipeline.RECOMMENDED_VARIANT)
-)
+CONVERSION_ORDER = tuple(sorted(VARIANTS, key=lambda name: name != pipeline.RECOMMENDED_VARIANT))
 
 # display.png is NOT written. The canvas prototype proved the app never reads it — it derives
 # outlines from the region map at load — and dropping it takes a bundle from 4.1MB to 760KB, a 5.5x
@@ -118,6 +119,14 @@ class JobRunner:
                 raise FileNotFoundError("upload missing")
 
             source = images.load(upload)
+            job_started = time.perf_counter()
+            log.info(
+                "%s: converting %dx%d px, order %s",
+                job_id[:8],
+                source.shape[1],
+                source.shape[0],
+                " -> ".join(CONVERSION_ORDER),
+            )
             for name in CONVERSION_ORDER:
                 variant = pipeline.VARIANTS[name]
                 started = time.perf_counter()
@@ -147,7 +156,19 @@ class JobRunner:
                 # Persisted per variant rather than at the end, so a client polling mid-conversion
                 # can start on the first variant instead of waiting for all three.
                 self.storage.write_job(record)
+                log.info(
+                    "%s: %s done in %.1fs (%d regions, %d colours)%s",
+                    job_id[:8],
+                    name,
+                    record["variants"][name]["seconds"],
+                    conversion.n_regions,
+                    conversion.n_colours,
+                    "  <- the app can open now" if name == pipeline.RECOMMENDED_VARIANT else "",
+                )
 
+            log.info(
+                "%s: all variants done in %.1fs", job_id[:8], time.perf_counter() - job_started
+            )
             record["status"] = "succeeded"
             # The photo has served its purpose once artifacts exist. Keeping it would mean holding
             # someone's family photo indefinitely for no benefit.
@@ -157,6 +178,9 @@ class JobRunner:
             record["status"] = "failed"
             record["error"] = f"{type(error).__name__}: {error}"
             record["traceback"] = traceback.format_exc(limit=6)
+            # The client is told the job failed but never sees the traceback, so without this
+            # the only copy of why is a JSON file on disk.
+            log.exception("%s: conversion failed", job_id[:8])
 
         finally:
             record["finished_at"] = time.time()
