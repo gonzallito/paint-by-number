@@ -72,14 +72,20 @@ ONE_SHOT_SEGMENTATION = True
 FIXED_RADIUS_FLOOR = 0.10
 
 
-# Subject budget share when the background is fully defocused. A bokeh backdrop needs only a
-# handful of shapes, so nearly the whole budget should go to the subject.
+# Hard ceiling on the subject's share, for the case where it fills nearly the whole frame. Only a
+# clamp: the share itself is derived from area, not chosen.
 MAX_SUBJECT_SHARE = 0.82
 
-# Absolute ceiling on background regions at full simplification. Expressed as a count rather
-# than a share because "how many shapes does an out-of-focus backdrop deserve" does not depend
-# on how detailed the user asked the subject to be.
-BACKGROUND_REGIONS_WHEN_FLAT = 120
+# How much denser the subject may be than the background, per unit area.
+#
+# 1.0 would be perfectly uniform. 2.0 gives the subject a little more attention without the result
+# reading as lopsided, and matches the density measured on artwork that was approved before the
+# budget split became active (1.3x to 2.3x across the corpus).
+#
+# Do not raise this to "emphasise the subject". That has been tried and rejected twice: once as the
+# face tier, and once accidentally when a fixed 72% share went live and put 12.6x the density on a
+# subject covering 17% of the frame.
+SUBJECT_DENSITY_BOOST = 2.0
 
 
 @dataclass(frozen=True)
@@ -262,7 +268,7 @@ def _segment_to_target(
     mask: np.ndarray | None,
     target: int,
     subject_share: float,
-    background_cap: int,
+    background_cap: int | None,
 ):
     """Segment to roughly ``target`` regions.
 
@@ -447,25 +453,24 @@ def convert(
     lab = color.rgb_to_lab(colour_source)
     timings["quantize"] = time.perf_counter() - t
 
-    # A defocused background loses region budget as well as detail. Flattening alone is not
-    # enough: even a heavily flattened bokeh backdrop still has enough residual variation to
-    # absorb hundreds of regions if the budget allows it.
-    subject_share = float(
-        np.interp(simplify, (0.0, 1.0), (segment.DEFAULT_SUBJECT_BUDGET_SHARE, MAX_SUBJECT_SHARE))
-    )
-    background_cap = int(
-        round(
-            float(
-                np.interp(
-                    simplify, (0.0, 1.0), (TARGET_REGIONS_MAX * 3, BACKGROUND_REGIONS_WHEN_FLAT)
-                )
-            )
-        )
-    )
+    # Region budget split between the two sides of the silhouette, allocated by AREA with a
+    # modest density boost for the subject.
+    #
+    # Emphatically NOT a fixed share. A fixed 72% given to a subject covering 17% of the frame is
+    # 12.6x the region density of everything else, which reads as one intensely detailed object
+    # marooned in an empty picture. Uniform-ish density has been the requirement throughout, and
+    # is why the face tier was dropped earlier for exactly this reason.
+    #
+    # A flat background needs no cap to behave: regions merge cheapest-first, so an empty sky
+    # surrenders its regions on its own. Capping it outright instead starved every non-subject
+    # area, including detailed ones.
+    coverage = 0.0 if found is None else float(found.coverage)
+    boosted = SUBJECT_DENSITY_BOOST * coverage
+    subject_share = min(boosted / max(boosted + (1.0 - coverage), 1e-6), MAX_SUBJECT_SHARE)
 
     t = time.perf_counter()
     floor, seg = _segment_to_target(
-        quantised, boundary_labels, lab, mask, target, subject_share, background_cap
+        quantised, boundary_labels, lab, mask, target, subject_share, None
     )
     timings["segment"] = time.perf_counter() - t
 
