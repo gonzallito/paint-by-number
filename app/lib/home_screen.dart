@@ -8,6 +8,7 @@ import 'artwork.dart';
 import 'artwork_screen.dart';
 import 'library.dart';
 import 'service_client.dart';
+import 'settings.dart';
 
 /// Entry point of the app: convert a photo, or reopen something already converted.
 ///
@@ -28,6 +29,15 @@ class _HomeScreenState extends State<HomeScreen> {
   ArtworkLibrary? _library;
   List<LibraryEntry> _entries = const [];
 
+  Settings? _settings;
+
+  /// Address the user set by hand, if any. Tried first during discovery.
+  String? _savedUrl;
+
+  /// The address discovery settled on, or null if nothing answered.
+  String? _serviceUrl;
+  bool _probing = true;
+
   /// Non-null while a conversion is in flight.
   _Progress? _progress;
   String? _error;
@@ -47,11 +57,88 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openLibrary() async {
     final library = await ArtworkLibrary.open();
     final entries = await library.list();
+    final settings = await Settings.open();
+    final saved = await settings.serviceUrl();
     if (!mounted) return;
     setState(() {
       _library = library;
       _entries = entries;
+      _settings = settings;
+      _savedUrl = saved;
     });
+    // Find the service now rather than at upload time, so a connection problem is visible
+    // before the user picks a photo instead of after.
+    await _discover();
+  }
+
+  Future<void> _discover({bool force = false}) async {
+    if (!mounted) return;
+    setState(() => _probing = true);
+    try {
+      final url = await _service.discover(saved: _savedUrl, force: force);
+      if (!mounted) return;
+      setState(() {
+        _probing = false;
+        _serviceUrl = url;
+        _error = null;
+      });
+    } on ConversionException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _probing = false;
+        _serviceUrl = null;
+        _error = error.message;
+      });
+    }
+  }
+
+  Future<void> _editServiceUrl() async {
+    final controller = TextEditingController(text: _savedUrl ?? '');
+    final entered = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E22),
+        title: const Text('Conversion service address'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Leave empty to detect automatically. Set this when the phone and computer are '
+              'on the same Wi-Fi: use the computer\'s LAN address, and start the service with '
+              '--host 0.0.0.0',
+              style: TextStyle(fontSize: 12, color: Color(0xFF8A8A94)),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autocorrect: false,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                hintText: 'http://192.168.1.20:8000',
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (entered == null) return;
+
+    await _settings?.setServiceUrl(entered);
+    if (!mounted) return;
+    setState(() => _savedUrl = entered.trim().isEmpty ? null : entered.trim());
+    await _discover(force: true);
   }
 
   Future<void> _convert(ImageSource source) async {
@@ -69,9 +156,19 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (picked == null) return;
 
-    setState(() => _progress = const _Progress(0.0, 'Uploading photo'));
+    setState(() => _progress = const _Progress(0.0, 'Finding the service'));
 
     try {
+      // Re-check rather than trusting the launch-time result: a USB cable gets replugged, adb
+      // reverse gets lost, the laptop changes network.
+      final url = await _service.discover(saved: _savedUrl);
+      if (mounted) {
+        setState(() {
+          _serviceUrl = url;
+          _progress = const _Progress(0.0, 'Uploading photo');
+        });
+      }
+
       final jobId = await _service.upload(File(picked.path));
 
       final ready = await _service.awaitRecommended(
@@ -200,12 +297,25 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Paint by Number'),
         backgroundColor: const Color(0xFF17171A),
+        actions: [
+          IconButton(
+            tooltip: 'Conversion service address',
+            icon: const Icon(Icons.settings_ethernet),
+            onPressed: _editServiceUrl,
+          ),
+        ],
       ),
       body: SafeArea(
         child: progress != null
             ? _ConvertingView(progress: progress)
             : Column(
                 children: [
+                  _ServiceStatus(
+                    url: _serviceUrl,
+                    probing: _probing,
+                    onRetry: () => _discover(force: true),
+                    onEdit: _editServiceUrl,
+                  ),
                   if (_error != null) _ErrorBanner(message: _error!),
                   _ConvertButtons(
                     onGallery: () => _convert(ImageSource.gallery),
@@ -339,6 +449,94 @@ class _ConvertButtons extends StatelessWidget {
               label: const Text('Take photo'),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Always-visible connection state.
+///
+/// Present because "nothing happens when I upload" was, twice, a connection problem that the UI
+/// gave no hint about until after a photo had been picked. Showing it up front turns an
+/// invisible precondition into something checkable at a glance.
+class _ServiceStatus extends StatelessWidget {
+  const _ServiceStatus({
+    required this.url,
+    required this.probing,
+    required this.onRetry,
+    required this.onEdit,
+  });
+
+  final String? url;
+  final bool probing;
+  final VoidCallback onRetry;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    if (probing) {
+      return const _StatusBar(
+        colour: Color(0xFF23232A),
+        dot: Color(0xFF8A8A94),
+        text: 'Looking for the conversion service...',
+      );
+    }
+    if (url == null) {
+      return _StatusBar(
+        colour: const Color(0xFF3A1F22),
+        dot: const Color(0xFFFF6B7A),
+        text: 'No conversion service found',
+        action: TextButton(onPressed: onRetry, child: const Text('Retry')),
+        secondary: TextButton(onPressed: onEdit, child: const Text('Set address')),
+      );
+    }
+    return _StatusBar(
+      colour: const Color(0xFF1B2A1F),
+      dot: const Color(0xFF6BDF8A),
+      text: 'Connected to $url',
+    );
+  }
+}
+
+class _StatusBar extends StatelessWidget {
+  const _StatusBar({
+    required this.colour,
+    required this.dot,
+    required this.text,
+    this.action,
+    this.secondary,
+  });
+
+  final Color colour;
+  final Color dot;
+  final String text;
+  final Widget? action;
+  final Widget? secondary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: colour,
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 6, bottom: 6),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: Color(0xFFB8B8C0)),
+            ),
+          ),
+          ?secondary,
+          ?action,
         ],
       ),
     );

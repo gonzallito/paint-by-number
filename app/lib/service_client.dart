@@ -15,24 +15,76 @@ import 'package:http_parser/http_parser.dart';
 /// for the whole job finishing — which is roughly a third of the wait.
 class ConversionService {
   ConversionService({String? baseUrl, http.Client? client})
-    : baseUrl = baseUrl ?? defaultBaseUrl,
+    : baseUrl = baseUrl ?? _fallbackBaseUrl,
+      _resolved = baseUrl != null,
       _client = client ?? http.Client();
 
-  /// Default points at the host machine as seen from the Android emulator. `localhost` inside
-  /// an emulator is the emulated device itself, not the development machine, which is a
-  /// classic source of "connection refused" confusion.
-  ///
-  /// Override at build time:
+  /// Set explicitly at build time, if at all:
   ///   flutter run --dart-define=PBN_SERVICE_URL=http://192.168.1.20:8000
   ///
-  /// On a physical device over USB, `adb reverse tcp:8000 tcp:8000` makes localhost work.
-  static const String defaultBaseUrl = String.fromEnvironment(
-    'PBN_SERVICE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
-  );
+  /// Empty by default so [discover] can tell "the user chose this" from "nobody said".
+  static const String configuredBaseUrl = String.fromEnvironment('PBN_SERVICE_URL');
 
-  final String baseUrl;
+  /// Used only until discovery runs, so the field is never null.
+  static const String _fallbackBaseUrl = 'http://localhost:8000';
+
+  /// Addresses to try, in order of decreasing confidence.
+  ///
+  /// There is no single address that works everywhere, which is what made this a recurring
+  /// dead end. An emulator reaches the host at 10.0.2.2 and cannot use localhost, because
+  /// inside the emulator localhost is the emulated device. A physical phone cannot use either:
+  /// it needs `adb reverse tcp:8000 tcp:8000` over USB, after which localhost works — or the
+  /// host's LAN address, which nothing here can guess.
+  ///
+  /// So rather than pick one and make the user diagnose it, try them.
+  static List<String> candidates({String? saved}) {
+    final ordered = <String>[
+      if (saved != null && saved.trim().isNotEmpty) saved.trim(),
+      if (configuredBaseUrl.isNotEmpty) configuredBaseUrl,
+      // Physical device with adb reverse, and any desktop build.
+      'http://localhost:8000',
+      // Android emulator.
+      'http://10.0.2.2:8000',
+    ];
+    // Preserve order while removing duplicates.
+    return ordered.toSet().toList();
+  }
+
+  String baseUrl;
+  bool _resolved;
   final http.Client _client;
+
+  /// Is this address serving the conversion API?
+  Future<bool> probe(String url) async {
+    try {
+      final response = await _client
+          .get(Uri.parse('$url/healthz'))
+          .timeout(const Duration(seconds: 3));
+      if (response.statusCode != 200) return false;
+      // Check it is actually our service and not some other thing on port 8000.
+      final body = jsonDecode(response.body);
+      return body is Map && body['variants'] != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Find a reachable service, remember it, and return it.
+  ///
+  /// Throws [ServiceUnreachableException] naming everything tried, so a failure says what to
+  /// do rather than just that it did not work.
+  Future<String> discover({String? saved, bool force = false}) async {
+    if (_resolved && !force) return baseUrl;
+    final tried = candidates(saved: saved);
+    for (final candidate in tried) {
+      if (await probe(candidate)) {
+        baseUrl = candidate;
+        _resolved = true;
+        return baseUrl;
+      }
+    }
+    throw ServiceUnreachableException(tried.join('\n  '));
+  }
 
   void close() => _client.close();
 
@@ -69,12 +121,22 @@ class ConversionService {
     try {
       return await call();
     } on http.ClientException catch (_) {
-      throw ServiceUnreachableException(baseUrl);
+      throw _unreachable();
     } on SocketException catch (_) {
-      throw ServiceUnreachableException(baseUrl);
+      throw _unreachable();
     } on TimeoutException catch (_) {
-      throw ServiceUnreachableException(baseUrl);
+      throw _unreachable();
     }
+  }
+
+  /// Give up on the resolved address as well as failing the call.
+  ///
+  /// A cable gets unplugged and adb reverse dies with it, so the address that worked a minute
+  /// ago may simply be gone. Clearing this makes the next attempt search again rather than
+  /// stubbornly retrying somewhere nothing is listening.
+  ServiceUnreachableException _unreachable() {
+    _resolved = false;
+    return ServiceUnreachableException(baseUrl);
   }
 
   /// Upload a photo and return the job id.
@@ -311,20 +373,24 @@ class ConversionException implements Exception {
 
 /// The service could not be contacted at all.
 ///
-/// Separate from a general failure because the fix is specific and almost always the same, and
-/// because the underlying transport errors name no address — which makes them read as a bug in
-/// the app rather than a service that is not running.
+/// Separate from a general failure because the fix is specific, and because the underlying
+/// transport errors name no address — which makes them read as a bug in the app rather than as a
+/// service that cannot be reached.
 class ServiceUnreachableException extends ConversionException {
-  ServiceUnreachableException(this.baseUrl) : super(_describeUnreachable(baseUrl));
+  ServiceUnreachableException(this.addresses) : super(_describeUnreachable(addresses));
 
-  final String baseUrl;
+  /// One address, or several separated by newlines when discovery tried a list.
+  final String addresses;
 }
 
-String _describeUnreachable(String baseUrl) =>
-    'Could not reach the conversion service at $baseUrl.\n\n'
-    'Check that it is running on your computer.\n\n'
-    'From an emulator the host is 10.0.2.2, never localhost — inside the emulator, localhost is '
-    'the emulated device itself. 10.0.2.2 is an alias for the host loopback, so a service bound '
-    'to 127.0.0.1 is fine.\n\n'
-    'On a real device, either run adb reverse tcp:8000 tcp:8000 over USB, or bind the service to '
-    '0.0.0.0 and point PBN_SERVICE_URL at your computer\'s LAN address.';
+String _describeUnreachable(String addresses) =>
+    'Could not reach the conversion service.\n\n'
+    'Tried:\n  $addresses\n\n'
+    'ON A PHONE CONNECTED BY USB — run this on your computer, then retry:\n'
+    '  adb reverse tcp:8000 tcp:8000\n'
+    'That forwards the phone\'s localhost:8000 to your computer. It has to be re-run whenever '
+    'the phone reconnects.\n\n'
+    'ON THE SAME WI-FI INSTEAD — start the service with --host 0.0.0.0 and set the address '
+    'manually from the menu, using your computer\'s LAN address, e.g. http://192.168.1.20:8000\n\n'
+    'ON AN EMULATOR — 10.0.2.2 is the host, never localhost, and is tried automatically.\n\n'
+    'Also check the service is actually running.';

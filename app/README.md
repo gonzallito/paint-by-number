@@ -26,16 +26,27 @@ flutter run --profile       # performance, physical device only
 
 ### Reaching the service
 
-| running on | base URL | notes |
+The app **finds the service itself**, probing `/healthz` on each candidate in turn and remembering
+what answered. A status bar at the top of the library shows the result, so a connection problem is
+visible before you pick a photo rather than after.
+
+| running on | works via | you must |
 |---|---|---|
-| Android emulator | `http://10.0.2.2:8000` | the default, no setup needed |
-| USB device | `http://localhost:8000` | run `adb reverse tcp:8000 tcp:8000` first |
-| device on Wi-Fi | `http://<your-LAN-ip>:8000` | bind the service with `--host 0.0.0.0` |
+| Android emulator | `http://10.0.2.2:8000` | nothing |
+| **USB phone** | `http://localhost:8000` | **`adb reverse tcp:8000 tcp:8000`** |
+| phone on same Wi-Fi | `http://<LAN-ip>:8000` | bind `--host 0.0.0.0`, set the address in-app |
 
-`10.0.2.2` is an alias for the **host loopback**, so a service bound to `127.0.0.1` is reachable
-from an emulator. `localhost` is not: inside the emulator that is the emulated device itself.
+There is no address that works everywhere, which is what made this a repeated dead end:
 
-Override the default:
+- An emulator reaches the host at `10.0.2.2` and **cannot** use `localhost` — inside the emulator
+  that is the emulated device. `10.0.2.2` is an alias for the host loopback, so a service bound to
+  `127.0.0.1` is fine.
+- A **physical phone** can use neither. `10.0.2.2` is meaningless to it. Run
+  `adb reverse tcp:8000 tcp:8000` over USB, which forwards the phone's `localhost:8000` to your
+  computer; re-run it whenever the phone reconnects. Or use the LAN address, which nothing in the
+  app can guess — set it from the toolbar button.
+
+To pin an address at build time instead:
 
 ```bash
 flutter run --dart-define=PBN_SERVICE_URL=http://192.168.1.20:8000
