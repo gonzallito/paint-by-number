@@ -44,6 +44,9 @@ MAX_SUBJECT_SHARE = 0.85
 _KMEANS_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
 _KMEANS_ATTEMPTS = 3
 
+# Any fixed value works; what matters is that it is fixed. See _kmeans_lab.
+KMEANS_SEED = 12345
+
 
 @dataclass
 class Quantized:
@@ -88,6 +91,15 @@ def _kmeans_lab(lab_pixels: np.ndarray, k: int) -> np.ndarray:
     k = int(min(k, rows.shape[0]))
     if k <= 1:
         return rows.mean(axis=0, keepdims=True)
+    # Seed OpenCV's global RNG so k-means++ picks the same initial centres every run.
+    #
+    # Without this the same photo produces a different artwork each conversion — measured at
+    # 1000 regions/81 colours on one run and 1021/80 on the next for an identical input. That
+    # is a product bug, not just noise: the service deduplicates uploads by content digest, so
+    # re-uploading a photo returns the first artwork rather than what converting it again would
+    # now produce. It also makes any quality change unmeasurable, since a difference cannot be
+    # attributed to the change rather than the draw.
+    cv2.setRNGSeed(KMEANS_SEED)
     _, _, centres = cv2.kmeans(
         rows, k, None, _KMEANS_CRITERIA, _KMEANS_ATTEMPTS, cv2.KMEANS_PP_CENTERS
     )

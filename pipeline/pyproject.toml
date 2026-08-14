@@ -11,6 +11,10 @@ dependencies = [
     "scikit-learn>=1.5",
     "scipy>=1.14",
     "pillow>=10.4",
+    # HEIF/HEIC decoding. NOT optional: it is the default capture format on iPhones and on
+    # recent Android, so without it the app rejects a large share of real camera rolls. OpenCV
+    # cannot decode it at all, which surfaced as "could not decode image" on a real upload.
+    "pillow-heif>=0.18",
     "matplotlib>=3.9",
     "tqdm>=4.66",
 ]

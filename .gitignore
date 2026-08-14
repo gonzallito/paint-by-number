@@ -57,3 +57,13 @@ out-upscale-test/
 
 .batch1/
 .batch2/
+
+# Service runtime data and venv
+service/.data/
+service/.venv/
+service/.data-server.log
+
+# Guard against the nested project path reappearing. flutter create was originally run
+# from inside app/, producing app/app/, and generated files committed from there escaped
+# Flutter own ignore rules which live at app/ios/.gitignore and app/android/.
+app/app/

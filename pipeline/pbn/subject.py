@@ -54,6 +54,19 @@ def is_available() -> bool:
     return True
 
 
+def warm(model: str = DEFAULT_MODEL) -> bool:
+    """Create the session ahead of time. Returns False if the extra is not installed.
+
+    Worth calling at service start-up. The u2net weights are a **176MB download** on first use,
+    and without this the cost lands on whichever user happens to convert first — appearing to
+    them as a conversion that hangs, since nothing reports a model download as progress.
+    """
+    if not is_available():
+        return False
+    _session(model)
+    return True
+
+
 def _session(model: str):
     """Lazily create and cache a rembg session (init costs ~2.4s)."""
     if model not in _SESSIONS:

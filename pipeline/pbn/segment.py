@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass
+from math import sqrt
 
 import cv2
 import numpy as np
@@ -252,21 +253,35 @@ class _Merger:
         preserve_silhouette: bool,
     ) -> None:
         self.n = int(area.shape[0])
-        self.area = area.astype(np.float64).copy()
-        self.perimeter = perimeter.astype(np.float64).copy()
-        self.sums = sums.astype(np.float64).copy()
-        self.is_subject = is_subject.copy()
+
+        # Plain Python lists, NOT NumPy arrays, for everything the merge loop touches.
+        #
+        # This is the single largest cost in the whole pipeline and it was almost entirely
+        # NumPy overhead. `_cost` runs millions of times per conversion, and it was doing
+        # arithmetic on 3-element arrays — where a NumPy operation costs microseconds of
+        # dispatch to do nanoseconds of work. Indexing a NumPy array with a Python int is
+        # itself slow, since it boxes a scalar object on every access.
+        #
+        # The LAB sums are split into three float lists for the same reason: `sums[i] / area[i]`
+        # allocated a fresh array on each of 11 million calls.
+        self.area = [float(x) for x in area]
+        self.perimeter = [float(x) for x in perimeter]
+        sums64 = sums.astype(np.float64)
+        self.sum_l = [float(x) for x in sums64[:, 0]]
+        self.sum_a = [float(x) for x in sums64[:, 1]]
+        self.sum_b = [float(x) for x in sums64[:, 2]]
+        self.is_subject = [bool(x) for x in is_subject]
         # With no subject detected there is no foreground to protect, so the coarse
         # background floor must not apply — otherwise every region on a subject-less image
         # gets treated as background and the whole frame over-merges.
-        self.has_subject = bool(is_subject.any())
+        self.has_subject = any(self.is_subject)
         self.radius_ref = max(radius_ref, 1e-6)
         self.min_radius = min_radius
         self.preserve_silhouette = preserve_silhouette
 
-        self.parent = np.arange(self.n, dtype=np.int64)
-        self.alive = np.ones(self.n, dtype=bool)
-        self.generation = np.zeros(self.n, dtype=np.int64)
+        self.parent = list(range(self.n))
+        self.alive = [True] * self.n
+        self.generation = [0] * self.n
         self.remaining = self.n
 
         # neighbour -> shared border length, so perimeter stays exact across merges.
@@ -278,9 +293,6 @@ class _Merger:
 
     # --- geometry / cost -------------------------------------------------------------
 
-    def _mean_lab(self, i: int) -> np.ndarray:
-        return self.sums[i] / max(self.area[i], 1.0)
-
     def effective_radius(self, i: int) -> float:
         """``2 * area / perimeter``: the radius of a disc with the same area:perimeter ratio.
 
@@ -289,7 +301,8 @@ class _Merger:
         the dev set, every single region that failed number placement had sufficient area
         and insufficient interior room.
         """
-        return 2.0 * self.area[i] / max(self.perimeter[i], 1.0)
+        perimeter = self.perimeter[i]
+        return 2.0 * self.area[i] / (perimeter if perimeter > 1.0 else 1.0)
 
     def _contact(self, i: int, j: int) -> float:
         """Shared border as a fraction of the smaller region's perimeter, in 0..1.
@@ -302,20 +315,59 @@ class _Merger:
         a smooth snake.
         """
         shared = self.neighbours[i].get(j, 0.0)
-        smaller_perimeter = max(1.0, min(self.perimeter[i], self.perimeter[j]))
-        return min(1.0, shared / smaller_perimeter)
+        perimeter_i = self.perimeter[i]
+        perimeter_j = self.perimeter[j]
+        smaller = perimeter_i if perimeter_i < perimeter_j else perimeter_j
+        if smaller < 1.0:
+            smaller = 1.0
+        contact = shared / smaller
+        return contact if contact < 1.0 else 1.0
 
     def _cost(self, i: int, j: int) -> float:
         """Colour difference, adjusted for sliver size, shape outcome and background priority."""
-        difference = float(np.sqrt(np.sum((self._mean_lab(i) - self._mean_lab(j)) ** 2)))
-        smaller = min(self.effective_radius(i), self.effective_radius(j))
+        # Mean LAB inlined and unrolled over three floats. This is the hottest function in the
+        # pipeline; the array version allocated two 3-element arrays per call.
+        area_i = self.area[i]
+        if area_i < 1.0:
+            area_i = 1.0
+        area_j = self.area[j]
+        if area_j < 1.0:
+            area_j = 1.0
+        # Division rather than multiplication by a reciprocal: x/y and x*(1/y) differ in the
+        # final bits, and this rewrite has to produce byte-identical artwork to what it
+        # replaces, which is how it was verified.
+        delta_l = self.sum_l[i] / area_i - self.sum_l[j] / area_j
+        delta_a = self.sum_a[i] / area_i - self.sum_a[j] / area_j
+        delta_b = self.sum_b[i] / area_i - self.sum_b[j] / area_j
+        difference = sqrt(delta_l * delta_l + delta_a * delta_a + delta_b * delta_b)
+
+        # effective_radius and _contact are inlined below, and min/max are written as
+        # conditionals. Both are ugly and both are justified only here: this function ran 5.2
+        # million times per conversion, so a builtin call that costs 50ns costs seconds. The
+        # comparisons are written to return the same value min/max would on ties.
+        perimeter_i = self.perimeter[i]
+        perimeter_j = self.perimeter[j]
+        radius_i = 2.0 * self.area[i] / (perimeter_i if perimeter_i > 1.0 else 1.0)
+        radius_j = 2.0 * self.area[j] / (perimeter_j if perimeter_j > 1.0 else 1.0)
+        smaller = radius_i if radius_i < radius_j else radius_j
+
         # Slivers and micro-facets merge nearly free; full colour cost applies only once a
         # region is round enough and big enough to work as its own tap target.
-        size_factor = min(1.0, smaller / self.radius_ref)
+        size_factor = smaller / self.radius_ref
+        if size_factor > 1.0:
+            size_factor = 1.0
+
         scale = 1.0 if (self.is_subject[i] or self.is_subject[j]) else BACKGROUND_COST_SCALE
+
         # Dividing by contact makes well-joined pairs cheap and barely-touching pairs
         # expensive, so the merger builds blobs instead of chains.
-        shape_factor = 1.0 / (self._contact(i, j) + CONTACT_EPSILON) ** CONTACT_EXPONENT
+        smaller_perimeter = perimeter_i if perimeter_i < perimeter_j else perimeter_j
+        if smaller_perimeter < 1.0:
+            smaller_perimeter = 1.0
+        contact = self.neighbours[i].get(j, 0.0) / smaller_perimeter
+        if contact > 1.0:
+            contact = 1.0
+        shape_factor = 1.0 / (contact + CONTACT_EPSILON) ** CONTACT_EXPONENT
         return difference * size_factor * scale * shape_factor
 
     def _legal(self, i: int, j: int) -> bool:
@@ -330,7 +382,12 @@ class _Merger:
         return self.min_radius * BACKGROUND_MIN_RADIUS_MULTIPLIER
 
     def _undersized(self, i: int) -> bool:
-        return self.effective_radius(i) < self._min_radius_for(i)
+        # effective_radius and _min_radius_for inlined; called 6.8 million times per conversion.
+        perimeter = self.perimeter[i]
+        radius = 2.0 * self.area[i] / (perimeter if perimeter > 1.0 else 1.0)
+        if self.is_subject[i] or not self.has_subject:
+            return radius < self.min_radius
+        return radius < self.min_radius * BACKGROUND_MIN_RADIUS_MULTIPLIER
 
     # --- merging ---------------------------------------------------------------------
 
@@ -345,8 +402,10 @@ class _Merger:
         self.perimeter[a] = self.perimeter[a] + self.perimeter[b] - 2.0 * border
 
         self.area[a] += self.area[b]
-        self.sums[a] += self.sums[b]
-        self.is_subject[a] = bool(self.is_subject[a] or self.is_subject[b])
+        self.sum_l[a] += self.sum_l[b]
+        self.sum_a[a] += self.sum_a[b]
+        self.sum_b[a] += self.sum_b[b]
+        self.is_subject[a] = self.is_subject[a] or self.is_subject[b]
         self.alive[b] = False
         self.parent[b] = a
         self.generation[a] += 1
@@ -375,9 +434,7 @@ class _Merger:
         return None
 
     def _push(self, heap: list, a: int, b: int) -> None:
-        heapq.heappush(
-            heap, (self._cost(a, b), a, b, int(self.generation[a]), int(self.generation[b]))
-        )
+        heapq.heappush(heap, (self._cost(a, b), a, b, self.generation[a], self.generation[b]))
 
     # --- passes ----------------------------------------------------------------------
 
@@ -461,7 +518,9 @@ class _Merger:
             while parent[root] != root:
                 root = parent[root]
             parent[i] = root
-        return parent
+        # Back to NumPy here, where it is the right tool: the caller uses this to remap a
+        # multi-megapixel label image in one indexing operation.
+        return np.asarray(parent, dtype=np.int64)
 
     def unsatisfied(self, budget: int) -> bool:
         """True if either constraint could not be met.
