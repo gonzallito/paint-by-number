@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pbn import artifact, images, pipeline, render
+from pbn import CONVERSION_VERSION, artifact, images, pipeline, render
 
 from pbn_service.storage import Storage
 
@@ -97,15 +97,17 @@ class JobRunner:
     def submit(self, data: bytes, filename: str, deduplicate: bool = True) -> dict:
         """Store an upload and queue its conversion. Returns the job record.
 
-        Identical uploads reuse the existing job by content digest. Re-converting the same photo
-        costs a minute of CPU and produces byte-identical output, and users retry uploads far more
-        often than one would guess.
+        Identical uploads reuse the existing job by content digest **and pipeline version**.
+        Re-converting the same photo costs a minute of CPU and produces identical output, and users
+        retry uploads far more often than one would guess — but only while the pipeline is
+        unchanged. Once conversion changes, the old artwork is no longer the answer.
         """
         digest = hashlib.sha256(data).hexdigest()
 
         if deduplicate:
-            existing = self.storage.find_by_digest(digest)
+            existing = self.storage.find_by_digest(digest, CONVERSION_VERSION)
             if existing is not None:
+                log.info("%s: reusing existing conversion", existing["id"][:8])
                 return existing
 
         job_id = uuid.uuid4().hex[:16]
@@ -117,6 +119,7 @@ class JobRunner:
             "id": job_id,
             "status": "queued",
             "digest": digest,
+            "conversion_version": CONVERSION_VERSION,
             "original_filename": filename,
             "created_at": time.time(),
             "started_at": None,

@@ -38,6 +38,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _serviceUrl;
   bool _probing = true;
 
+  /// Convert again even when the service already holds an artwork for this photo.
+  bool _alwaysReconvert = false;
+
   /// Non-null while a conversion is in flight.
   _Progress? _progress;
   String? _error;
@@ -58,13 +61,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final library = await ArtworkLibrary.open();
     final entries = await library.list();
     final settings = await Settings.open();
-    final saved = await settings.serviceUrl();
     if (!mounted) return;
     setState(() {
       _library = library;
       _entries = entries;
       _settings = settings;
-      _savedUrl = saved;
+      _savedUrl = settings.serviceUrl;
+      _alwaysReconvert = settings.alwaysReconvert;
     });
     // Find the service now rather than at upload time, so a connection problem is visible
     // before the user picks a photo instead of after.
@@ -169,7 +172,10 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
 
-      final jobId = await _service.upload(File(picked.path));
+      final jobId = await _service.upload(
+        File(picked.path),
+        deduplicate: !_alwaysReconvert,
+      );
 
       final ready = await _service.awaitRecommended(
         jobId,
@@ -298,10 +304,26 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Paint by Number'),
         backgroundColor: const Color(0xFF17171A),
         actions: [
-          IconButton(
-            tooltip: 'Conversion service address',
-            icon: const Icon(Icons.settings_ethernet),
-            onPressed: _editServiceUrl,
+          PopupMenuButton<String>(
+            onSelected: (value) async {
+              if (value == 'address') {
+                await _editServiceUrl();
+              } else if (value == 'reconvert') {
+                await _settings?.setAlwaysReconvert(!_alwaysReconvert);
+                if (mounted) setState(() => _alwaysReconvert = !_alwaysReconvert);
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'address',
+                child: Text('Conversion service address...'),
+              ),
+              CheckedPopupMenuItem(
+                value: 'reconvert',
+                checked: _alwaysReconvert,
+                child: const Text('Always re-convert'),
+              ),
+            ],
           ),
         ],
       ),

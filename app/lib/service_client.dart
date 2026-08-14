@@ -140,12 +140,16 @@ class ConversionService {
   }
 
   /// Upload a photo and return the job id.
-  Future<String> upload(File photo) => _guarded(() => _upload(photo));
+  ///
+  /// With [deduplicate] false the service converts again even if it already holds an artwork for
+  /// this photo. Rarely needed, since its cache is keyed by pipeline version as well as content.
+  Future<String> upload(File photo, {bool deduplicate = true}) =>
+      _guarded(() => _upload(photo, deduplicate: deduplicate));
 
-  Future<String> _upload(File photo) async {
+  Future<String> _upload(File photo, {required bool deduplicate}) async {
     final request = http.MultipartRequest(
       'POST',
-      Uri.parse('$baseUrl/v1/conversions'),
+      Uri.parse('$baseUrl/v1/conversions?deduplicate=$deduplicate'),
     );
     final filename = photo.uri.pathSegments.last;
     request.files.add(

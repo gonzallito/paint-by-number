@@ -113,8 +113,13 @@ class Storage:
         records.sort(key=lambda record: record.get("created_at", 0), reverse=True)
         return records
 
-    def find_by_digest(self, digest: str) -> dict | None:
-        """An existing *finished* job for this content, or None.
+    def find_by_digest(self, digest: str, conversion_version: int) -> dict | None:
+        """An existing *finished* job for this content and this pipeline, or None.
+
+        Matching on the pipeline version as well as the photo matters: an artwork produced by an
+        older pipeline is not the artwork this one would produce. Without it, deduplication pins
+        every already-converted photo to whatever the algorithm did at the time, so no improvement
+        ever reaches it.
 
         Only succeeded jobs are reused. This used to reuse anything not marked failed, which
         included jobs left "queued" or "running" by a server that stopped mid-conversion — and
@@ -123,8 +128,14 @@ class Storage:
         never progress, with nothing in the log to say so.
         """
         for record in self.all_jobs():
-            if record.get("digest") == digest and record.get("status") == "succeeded":
-                return record
+            if record.get("status") != "succeeded":
+                continue
+            if record.get("digest") != digest:
+                continue
+            # Absent means it predates versioning, so it cannot be assumed current.
+            if record.get("conversion_version") != conversion_version:
+                continue
+            return record
         return None
 
     # --- deletion --------------------------------------------------------------------

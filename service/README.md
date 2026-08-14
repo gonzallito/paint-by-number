@@ -56,6 +56,14 @@ client re-opening an artwork should not re-download its region map.
 **Per-variant progress is persisted as it completes**, so a polling client can start on the first
 variant instead of waiting for all three.
 
+**Deduplication is keyed by photo digest _and_ `CONVERSION_VERSION`.** Reusing an artwork for a
+photo already converted saves a minute of CPU, but only while the pipeline that produced it still
+matches — otherwise an improvement never reaches any photo already in the cache, and re-uploading
+returns the old artwork forever. Bump `CONVERSION_VERSION` in `pbn/__init__.py` in the same commit
+as any change that alters output. Records with no version predate this and are never reused.
+
+Clients can also pass `?deduplicate=false` to force a fresh conversion.
+
 **The recommended variant is converted first** (`CONVERSION_ORDER` in `jobs.py`). This is a
 user-visible latency decision, not tidying: each variant is roughly a third of the job, and the app
 opens the recommended one, so producing it last made every user wait for two variants they were not
