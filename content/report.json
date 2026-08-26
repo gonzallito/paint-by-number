@@ -1,0 +1,26 @@
+{
+  "generated_at": 1787756596.2769525,
+  "conversion_version": 2,
+  "results": [
+    {
+      "id": "green-uniform",
+      "collection": "daily",
+      "profile": "daily",
+      "status": "built",
+      "seconds": 11.6,
+      "message": "",
+      "failures": [],
+      "metrics": {
+        "regions": 26,
+        "target_regions": 110,
+        "colours": 11,
+        "unnumbered": 0.0,
+        "numbers_at_fit": 1.0,
+        "min_tap_radius_px": 23.25940704345703,
+        "median_tap_radius_px": 47.52725791931152,
+        "untappable_regions": 0,
+        "merges_blocked": false
+      }
+    }
+  ]
+}

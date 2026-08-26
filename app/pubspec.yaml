@@ -69,6 +69,10 @@ flutter:
     # A real artifact bundle produced by the pipeline, so the prototype needs no server.
     # regions.png is the region-ID map; meta.json carries the palette and per-region geometry.
     - assets/artwork/martim/
+    # Today's daily canvas, built by `pbn build` against the `daily` profile: non-zoomable,
+    # every region tappable at fit-to-screen, every number visible without zooming. Bundled
+    # rather than downloaded because the daily manifest on the CDN does not exist yet.
+    - assets/daily/green-uniform/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

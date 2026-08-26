@@ -4,6 +4,8 @@ import 'package:flutter/scheduler.dart';
 import 'artwork.dart';
 import 'canvas_view.dart';
 import 'palette_tray.dart';
+import 'player.dart';
+import 'progress.dart';
 
 /// The bundled sample artwork. Kept because it needs no server, so the canvas and its
 /// instrumentation can be exercised even when the conversion service is not running.
@@ -14,10 +16,26 @@ const String kArtworkAsset = 'assets/artwork/martim';
 /// Takes a [BundleSource] rather than a path, so a downloaded artwork and the bundled sample
 /// open through exactly the same code.
 class ArtworkScreen extends StatefulWidget {
-  const ArtworkScreen({super.key, required this.source, required this.title});
+  const ArtworkScreen({
+    super.key,
+    required this.source,
+    required this.title,
+    this.progressStore,
+    this.progressKey,
+    this.player,
+  });
 
   final BundleSource source;
   final String title;
+
+  /// Where painting progress is saved and resumed from. Both this and [progressKey] must be set
+  /// for persistence to happen; either being null makes the canvas throwaway, which is what the
+  /// benchmark harness wants.
+  final ProgressStore? progressStore;
+  final String? progressKey;
+
+  /// Credited with XP and lifetime counters as regions are filled.
+  final PlayerStore? player;
 
   @override
   State<ArtworkScreen> createState() => _ArtworkScreenState();
@@ -28,6 +46,12 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
   Object? _error;
   PaletteColour? _selected;
   int _loadMillis = 0;
+
+  ProgressWriter? _writer;
+
+  /// True once the completion bonus has been credited, so reopening a finished canvas does not
+  /// pay again.
+  bool _rewarded = false;
 
   final CanvasStats _stats = CanvasStats();
 
@@ -44,6 +68,9 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
   @override
   void dispose() {
     _frames.stop();
+    // Flushes any pending write before going away. Popping the route is the most common way a
+    // session ends, and the debounce alone would lose the last few fills.
+    _writer?.dispose();
     super.dispose();
   }
 
@@ -51,16 +78,33 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
     final watch = Stopwatch()..start();
     try {
       final artwork = await Artwork.load(widget.source);
+
+      final store = widget.progressStore;
+      final key = widget.progressKey;
+      ProgressWriter? writer;
+      if (store != null && key != null) {
+        final saved = await store.load(key, artwork.regionCount);
+        if (saved != null) artwork.restoreFillState(saved);
+        writer = ProgressWriter(
+          store: store,
+          key: key,
+          snapshot: () => artwork.fillState,
+        );
+      }
+
       watch.stop();
-      if (!mounted) return;
+      if (!mounted) {
+        await writer?.dispose();
+        return;
+      }
       setState(() {
         _artwork = artwork;
+        _writer = writer;
         _loadMillis = watch.elapsedMilliseconds;
-        // Preselect the colour with the most regions, so a tester can start filling
-        // immediately rather than hunting the tray for something that exists.
-        _selected = artwork.palette.reduce(
-          (a, b) => a.regionIds.length >= b.regionIds.length ? a : b,
-        );
+        _rewarded = artwork.isComplete;
+        // Preselect the colour with the most regions *left*, so resuming lands on something
+        // still paintable rather than a colour that was finished last sitting.
+        _selected = _mostRemaining(artwork);
       });
     } catch (error) {
       if (!mounted) return;
@@ -68,10 +112,48 @@ class _ArtworkScreenState extends State<ArtworkScreen> {
     }
   }
 
+  static PaletteColour? _mostRemaining(Artwork artwork) {
+    PaletteColour? best;
+    var bestRemaining = 0;
+    for (final entry in artwork.palette) {
+      final remaining = artwork.remainingFor(entry);
+      if (remaining > bestRemaining) {
+        bestRemaining = remaining;
+        best = entry;
+      }
+    }
+    // Fall back to the first entry so a finished canvas still shows a selection.
+    return best ?? (artwork.palette.isEmpty ? null : artwork.palette.first);
+  }
+
   void _onRegionFilled(int regionId, bool correct) {
+    final artwork = _artwork;
     // Rebuild for the progress readout and tray counts. A wrong tap deliberately changes
     // nothing on the canvas.
-    setState(() {});
+    if (!correct || artwork == null) {
+      setState(() {});
+      return;
+    }
+
+    _writer?.markDirty();
+    final player = widget.player;
+    player?.recordRegionPainted();
+
+    var selected = _selected;
+    if (selected != null && artwork.remainingFor(selected) == 0) {
+      player?.recordColourCompleted();
+      selected = _mostRemaining(artwork);
+    }
+
+    if (artwork.isComplete && !_rewarded) {
+      _rewarded = true;
+      player?.recordCanvasCompleted(isDaily: false);
+      // Flushed rather than debounced: finishing is the one event whose loss is visible.
+      _writer?.flush();
+      player?.flush();
+    }
+
+    setState(() => _selected = selected);
   }
 
   @override

@@ -24,6 +24,12 @@ class CanvasStats {
 /// transformed subtree so they stay a constant size on screen while the artwork scales.
 /// That is what makes small regions numberable at all, and why the pipeline was able to
 /// drop leader lines entirely.
+///
+/// With [zoomable] false the canvas is fixed at fit-to-screen and cannot pan or zoom. That
+/// is the daily canvas, and it is a different format rather than a setting: because nothing
+/// is revealed by zooming, every region must be tappable and every number legible at 1x.
+/// The `daily` content profile enforces exactly that at build time, so this mode is only
+/// safe for a bundle produced by it.
 class CanvasView extends StatefulWidget {
   const CanvasView({
     super.key,
@@ -31,6 +37,7 @@ class CanvasView extends StatefulWidget {
     required this.selectedColour,
     required this.onRegionFilled,
     required this.stats,
+    this.zoomable = true,
   });
 
   final Artwork artwork;
@@ -39,6 +46,9 @@ class CanvasView extends StatefulWidget {
   /// Reports (regionId, wasCorrect) so the shell can update progress and give feedback.
   final void Function(int regionId, bool correct) onRegionFilled;
   final CanvasStats stats;
+
+  /// False pins the canvas at fit-to-screen with no pan or zoom.
+  final bool zoomable;
 
   @override
   State<CanvasView> createState() => _CanvasViewState();
@@ -77,6 +87,50 @@ class _CanvasViewState extends State<CanvasView> {
   void initState() {
     super.initState();
     _fillPixels = Uint32List(widget.artwork.width * widget.artwork.height);
+    _restoreThenHighlight();
+  }
+
+  /// Render whatever the artwork arrived already filled with, then mark the selected colour.
+  ///
+  /// Ordered, not concurrent: the highlight covers *unfilled* regions of the selected colour, so
+  /// building it before restored fills are known would checker regions that are already painted.
+  Future<void> _restoreThenHighlight() async {
+    await _restoreSavedFills();
+    if (!mounted) return;
+    // Built here rather than only in didUpdateWidget, which fires on the first *change* to the
+    // selection and so left a freshly opened canvas with no highlight until something else
+    // triggered a rebuild.
+    await _rebuildHighlight(force: true);
+  }
+
+  /// Paint regions that resumed progress already marked as filled.
+  ///
+  /// One full-canvas upload rather than a patch per region: a half-finished canvas can hold
+  /// hundreds of filled regions, which would blow past the collapse threshold immediately and
+  /// pay for the same upload plus hundreds of small ones on the way.
+  Future<void> _restoreSavedFills() async {
+    final artwork = widget.artwork;
+    var restored = 0;
+    for (final region in artwork.regions) {
+      final number = artwork.filledColourOf(region.id);
+      if (number == 0) continue;
+      final colour = artwork.colourByNumber(number);
+      if (colour == null) continue;
+      _paintRegion(_fillPixels, region.id, colour.rgbaWord);
+      restored++;
+    }
+    if (restored == 0) return;
+
+    final image = await _decode(_fillPixels);
+    if (!mounted) {
+      image.dispose();
+      return;
+    }
+    setState(() {
+      _fillImage?.dispose();
+      _fillImage = image;
+      _revision++;
+    });
   }
 
   @override
@@ -354,7 +408,10 @@ class _CanvasViewState extends State<CanvasView> {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
         if (size != _viewport) {
           _viewport = size;
-          if (!_fitted && !size.isEmpty) {
+          // A fixed canvas has no user transform to preserve, so it refits whenever the
+          // viewport changes — the Home HUD collapsing is exactly that. A zoomable canvas
+          // fits once only, because refitting would discard the user's pan and zoom.
+          if ((!widget.zoomable || !_fitted) && !size.isEmpty) {
             _fitted = true;
             // Deferred: setting the controller during layout would mutate state mid-build.
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -369,30 +426,52 @@ class _CanvasViewState extends State<CanvasView> {
           child: ClipRect(
             child: Stack(
               children: [
-                InteractiveViewer(
-                  transformationController: _controller,
-                  // The child is sized in canvas pixels, so it is larger than the viewport
-                  // and must not be constrained to it.
-                  constrained: false,
-                  boundaryMargin: const EdgeInsets.all(double.infinity),
-                  minScale: _fitScale * 0.8,
-                  // The pipeline assumes numbers become legible by roughly 8x zoom; a
-                  // little headroom beyond that is comfortable, much more is pointless.
-                  maxScale: _fitScale * 16.0,
-                  child: SizedBox(
-                    width: artwork.width.toDouble(),
-                    height: artwork.height.toDouble(),
-                    child: CustomPaint(
-                      painter: _LayersPainter(
-                        artwork: artwork,
-                        fillImage: _fillImage,
-                        patches: _patches,
-                        highlightPatches: _highlightPatches,
-                        revision: _revision,
+                if (widget.zoomable)
+                  InteractiveViewer(
+                    transformationController: _controller,
+                    // The child is sized in canvas pixels, so it is larger than the viewport
+                    // and must not be constrained to it.
+                    constrained: false,
+                    boundaryMargin: const EdgeInsets.all(double.infinity),
+                    minScale: _fitScale * 0.8,
+                    // The pipeline assumes numbers become legible by roughly 8x zoom; a
+                    // little headroom beyond that is comfortable, much more is pointless.
+                    maxScale: _fitScale * 16.0,
+                    child: SizedBox(
+                      width: artwork.width.toDouble(),
+                      height: artwork.height.toDouble(),
+                      child: CustomPaint(
+                        painter: _LayersPainter(
+                          artwork: artwork,
+                          fillImage: _fillImage,
+                          patches: _patches,
+                          highlightPatches: _highlightPatches,
+                          revision: _revision,
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  // Fixed canvas. The painter applies the fit transform itself, so there is
+                  // no oversized child to lay out and no InteractiveViewer in the tree at
+                  // all. Taps and the number layer keep using the same controller matrix,
+                  // so the coordinate maths is shared with the zoomable path rather than
+                  // duplicated.
+                  Positioned.fill(
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, _) => CustomPaint(
+                        painter: _LayersPainter(
+                          artwork: artwork,
+                          fillImage: _fillImage,
+                          patches: _patches,
+                          highlightPatches: _highlightPatches,
+                          revision: _revision,
+                          transform: _controller.value.clone(),
+                        ),
                       ),
                     ),
                   ),
-                ),
                 // Numbers live outside the transformed subtree so they keep a constant
                 // on-screen size. Rebuilt from the controller, so panning and zooming
                 // move them without rebuilding the artwork layers.
@@ -431,7 +510,11 @@ class _FillPatch {
   final Offset offset;
 }
 
-/// Artwork layers, painted in canvas coordinates inside the transformed subtree.
+/// Artwork layers, painted in canvas coordinates.
+///
+/// On the zoomable path this sits inside InteractiveViewer's transformed subtree and
+/// [transform] is null. On the fixed path there is no transformed subtree, so the painter
+/// applies the fit matrix itself. Either way the drawing below is in canvas pixels.
 class _LayersPainter extends CustomPainter {
   _LayersPainter({
     required this.artwork,
@@ -439,6 +522,7 @@ class _LayersPainter extends CustomPainter {
     required this.patches,
     required this.highlightPatches,
     required this.revision,
+    this.transform,
   });
 
   final Artwork artwork;
@@ -449,14 +533,34 @@ class _LayersPainter extends CustomPainter {
   /// Monotonic counter identifying the layer state; see _CanvasViewState._revision.
   final int revision;
 
+  /// Canvas-to-viewport matrix, or null when an ancestor already applied it.
+  ///
+  /// Must be a snapshot rather than the controller's live matrix: Matrix4 compares by value,
+  /// so a matrix mutated in place would compare equal to itself and [shouldRepaint] would
+  /// miss the change.
+  final Matrix4? transform;
+
   @override
   void paint(Canvas canvas, Size size) {
+    final matrix = transform;
+    if (matrix != null) {
+      canvas.save();
+      canvas.transform(matrix.storage);
+    }
+
     final paint = Paint()..filterQuality = FilterQuality.low;
 
     // Order matters, and this order is what removes the per-tap highlight rebuild: the
     // highlight goes down FIRST, so a fill drawn over it covers its own highlight exactly and
     // no stale highlight can show through. Outlines go last so lines always stay visible.
-    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFFFFFFFF));
+    //
+    // The white ground is the canvas rect, not the painter's size: on the fixed path the
+    // painter fills the viewport while the artwork occupies only part of it, and painting the
+    // viewport white would put white bars beside the artwork instead of the page behind it.
+    canvas.drawRect(
+      Offset.zero & Size(artwork.width.toDouble(), artwork.height.toDouble()),
+      Paint()..color = const Color(0xFFFFFFFF),
+    );
     for (final patch in highlightPatches) {
       canvas.drawImage(patch.image, patch.offset, paint);
     }
@@ -465,10 +569,13 @@ class _LayersPainter extends CustomPainter {
       canvas.drawImage(patch.image, patch.offset, paint);
     }
     canvas.drawImage(artwork.outlineImage, Offset.zero, paint);
+
+    if (matrix != null) canvas.restore();
   }
 
   @override
-  bool shouldRepaint(_LayersPainter old) => old.revision != revision;
+  bool shouldRepaint(_LayersPainter old) =>
+      old.revision != revision || old.transform != transform;
 }
 
 /// Region numbers, painted in screen coordinates at constant size.

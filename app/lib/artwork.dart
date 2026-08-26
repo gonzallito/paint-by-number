@@ -115,7 +115,8 @@ class Artwork {
     required this.palette,
     required this.outlineImage,
     required this._regionBounds,
-  }) : _filledColour = Uint8List(regions.length);
+  }) : _filledColour = Uint8List(regions.length),
+       _byNumber = {for (final entry in palette) entry.number: entry};
 
   final int width;
   final int height;
@@ -144,6 +145,9 @@ class Artwork {
   /// colour rather than a flag lets the UI show a wrong fill distinctly from a right one.
   final Uint8List _filledColour;
 
+  /// Palette by its printed number. See [colourByNumber].
+  final Map<int, PaletteColour> _byNumber;
+
   int get regionCount => regions.length;
 
   bool isFilled(int regionId) => _filledColour[regionId] != 0;
@@ -153,6 +157,29 @@ class Artwork {
   void fill(int regionId, int colourNumber) {
     _filledColour[regionId] = colourNumber;
   }
+
+  bool get isComplete => filledCount == regions.length;
+
+  /// Raw per-region fill state: one byte per region, 0 unfilled, otherwise the 1-based palette
+  /// number. This is the persistence payload — see [ProgressStore] — and is exposed rather than
+  /// copied because the progress writer serialises it verbatim.
+  Uint8List get fillState => _filledColour;
+
+  /// Apply previously saved state.
+  ///
+  /// A length mismatch is ignored rather than throwing: it means the canvas was rebuilt with a
+  /// different region count, and applying the old bytes would colour arbitrary regions. Callers
+  /// get this filtered out by [ProgressStore.load] too; this is the second line of defence.
+  void restoreFillState(Uint8List bytes) {
+    if (bytes.length != _filledColour.length) return;
+    _filledColour.setAll(0, bytes);
+  }
+
+  /// Palette entry wearing [number], or null if there is none.
+  ///
+  /// Needed because palette numbers are 1-based and luminance-ordered, so the list index is not
+  /// the number. Restoring saved fills has to map a stored number back to its colour.
+  PaletteColour? colourByNumber(int number) => _byNumber[number];
 
   /// Bounds of a region as (minX, minY, maxX, maxY), inclusive.
   (int, int, int, int) boundsOf(int regionId) {
