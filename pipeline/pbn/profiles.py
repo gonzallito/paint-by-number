@@ -91,16 +91,23 @@ class Profile:
 PROFILES: dict[str, Profile] = {
     "daily": Profile(
         name="daily",
-        description="fixed canvas, 3-5 minutes, everything tappable without zooming",
-        target_regions=110,
-        n_colours=12,
+        description="fixed canvas, 3-5 minutes, 10 colours, everything tappable without zooming",
+        # Always 10 colours and 30-60 regions: a product rule, not a target to approach. The daily
+        # canvas is the habit loop, so it has to be the same short, easy shape every day.
+        #
+        # min_colours is 10, which means *exactly* 10 — the request can only ever be reduced by
+        # dedupe and pruning, never exceeded. Art that yields 9 is rejected rather than shipped,
+        # which is affordable precisely because daily art is generated to this spec and can be
+        # regenerated. Relax to 9 if that proves too strict in practice.
+        target_regions=55,
+        n_colours=10,
         canvas_long_edge=1400,
         zoomable=False,
         radius_floor=1.8,
         guarantee_min_radius=True,
-        min_regions=20,
-        max_regions=130,
-        min_colours=8,
+        min_regions=30,
+        max_regions=60,
+        min_colours=10,
         require_all_numbers_at_fit=True,
     ),
     "library-easy": Profile(

@@ -109,7 +109,7 @@ painting impossible to finish.
 
 | profile | regions | colours | canvas | zoom | gate |
 |---|---|---|---|---|---|
-| `daily` | 110 | 12 | 1400 | **no** | 20–130 regions, every region ≥14px on screen, all numbers visible at 1x |
+| `daily` | 55 | 10 | 1400 | **no** | 30–60 regions, **exactly 10** colours, every region ≥14px on screen, all numbers visible at 1x |
 | `library-easy` | 250 | 28 | 1400 | yes | 180–320 regions, ≥18 colours |
 | `library-medium` | 550 | 48 | 1900 | yes | 420–700 regions, ≥32 colours |
 | `library-hard` | 1200 | 88 | 2400 | yes | 900–1600 regions, ≥60 colours |
@@ -133,6 +133,12 @@ hundreds. Measured at 52.3s for 100 regions on a 1900px canvas against ~2s at 14
 
 Generating source art with AI? Prompt for **flat vector illustration, limited palette, clean
 outlines, no gradients, no texture, no grain**. Grain is what makes region counts explode.
+
+Daily art needs authoring to its own spec, and the gate is strict about it: **10 clearly separated
+colours, each covering enough area to survive merging down to ~55 regions**, built from a few large
+simple shapes. A colour that appears only in slivers gets pruned, and the canvas then fails on 9
+colours instead of 10. Busy source art fails on region count instead. Both rejections are the gate
+doing its job — daily art is generated to this spec, so regenerate rather than loosen.
 
 ## Status
 

@@ -20,13 +20,20 @@ Companion documents:
 A mobile colour-by-number game where painting drives a cozy fantasy RPG, and where the player can
 turn their own photographs into paintable canvases.
 
-The genre reference is Happy Color. The two departures from it:
+The genre reference is Happy Color, and **the familiar thing is still here**: the Library holds an
+ordinary catalogue of paintings to browse and colour, exactly as players already expect. That is the
+baseline the app has to match before anything else earns attention.
 
-1. **Painting is progression, not a content menu.** Completing canvases restores villages, advances
-   chapters, and unlocks companions. The player is somewhere, not browsing a grid.
-2. **Personal photos are a core feature, not a premium hook.** DECIDED. A player converts a photo of
-   their dog and paints it. This is the feature most likely to make someone stay, and it is the
-   hardest part of the build.
+Three features are added on top, and these are the differentiators:
+
+1. **A daily canvas.** A short, deliberately easy painting, the same shape every day, driving a
+   streak. The habit loop.
+2. **Personal photos.** DECIDED as a core feature, not a premium hook. A player converts a photo of
+   their dog and paints it. Most likely to make someone stay, and the hardest part of the build.
+3. **Story mode.** Painting as progression — completing canvases restores villages, advances
+   chapters, unlocks companions. The player is somewhere, rather than only browsing a grid.
+
+The catalogue is table stakes; the three above are the reason to choose this app over Happy Color.
 
 ### How it should feel
 
@@ -60,17 +67,28 @@ not the same canvas with different settings — they have different acceptance c
 | | Daily canvas | Library / Story / Photo canvas |
 |---|---|---|
 | Zoom | **None** — fixed, fit-to-screen | Pinch and pan, up to 8x |
-| Regions | 60–120 | 900–1600 |
-| Colours | 10–12 | 78–95 |
-| Session | 3–5 minutes | 30–90 minutes |
+| Regions | **30–60** | **100–1600**, deliberately varied |
+| Colours | **exactly 10** | **30–100**, deliberately varied |
+| Session | 3–5 minutes | 10–90 minutes |
 | Numbers | **All visible at 1x** | Revealed progressively by zoom |
 | Every region tappable at 1x | **Required** | Not required — zoom solves it |
+| Source art | purpose-made, few large simple shapes | anything |
 | Memory | ~26 MB | ~65–78 MB |
 | Rendering | Raster is pixel-perfect | Raster now; vectors are the long-term answer |
 
 DECIDED. The daily canvas cannot zoom, which removes the mechanism that makes small regions
 workable elsewhere. That single constraint changes the pipeline configuration completely, and it is
-why the daily format needs its own variant rather than a tweak to an existing one.
+why the daily format needs its own profile rather than a tweak to an existing one.
+
+**The daily canvas is always 10 colours and 30–60 regions.** A product rule, not a target to
+approach: it is the habit loop, so it has to be the same short, easy shape every day. Its source art
+is generated specifically for the format — a few large simple shapes, 10 clearly separated colours —
+rather than picked from general artwork.
+
+**Library canvases vary deliberately and widely**: some 30 colours and 100 regions, others 100
+colours and 1000. Variety is the point, so players can pick the commitment they want. This is
+expressed as difficulty tiers (see section 7), each an explicit recipe rather than whatever a
+particular piece of art happens to produce.
 
 ### The daily canvas needed a guarantee the merger could not give — now fixed
 
@@ -87,8 +105,21 @@ dumbbell can itself *lower* effective radius. It runs after the budget passes an
 count below budget if it must: on a fixed canvas the guarantee is worth more than the exact count.
 
 Enabled by `guarantee_min_radius`, which the `daily` profile sets and the upload path does not.
-Measured at floor 1.8 on illustration art: **24–47 regions, 0% under 14 screen pixels, 100% of
-numbers visible without zooming.**
+Measured at floor 1.8 with 10 colours on illustration art: **0% of regions under 14 screen pixels
+and 100% of numbers visible without zooming, on every image tested.**
+
+Region count is where general artwork fails: the same settings gave 21–47 regions across the corpus,
+so busy pieces land under the 30 floor. That is the gate working rather than a problem to tune away
+— daily art is authored to the format. Two of six corpus images pass, and the failures are
+instructive:
+
+| failure | cause | fix |
+|---|---|---|
+| `regions 21 outside 30-60` | source too busy | simpler art, fewer shapes |
+| `colours 9 below 10` | a colour survived only in slivers and was pruned | give all 10 colours real area |
+
+So the art spec for daily is concrete: **a few large simple shapes, and 10 clearly separated colours
+each covering enough area to survive merging down to ~55 regions.**
 
 The 14px bar is PROPOSED, not settled. It is deliberately below the 22px that Material's 44px touch
 target implies, because that figure is for controls which must be hit first time and where a miss
@@ -145,8 +176,14 @@ painting, about 91 MB.
 
 ### 3. Library
 
-- **Photo converter** — pick from gallery or camera, convert, paint. The core feature.
-- **Curated catalogue** — hundreds to thousands of canvases, searchable and filterable.
+The tab that has to feel familiar. Everything here is what a player already expects from the genre,
+plus the photo converter.
+
+- **Curated catalogue** — hundreds to thousands of ordinary paintings, browsable, searchable and
+  filterable. **Table stakes**, and the largest content cost in the project. Deliberately varied in
+  difficulty: 30 to 100 colours, 100 to 1600 regions, so players can pick their commitment.
+- **Photo converter** — pick from gallery or camera, convert, paint. A differentiator, and the
+  hardest part of the build.
 - **Personal collection** — in progress and completed.
 
 ### 4. Social — PROPOSED FOR REMOVAL FROM v1
@@ -283,6 +320,34 @@ The split:
 |---|---|---|
 | Player photos (UGC) | on device, eventually | privacy, offline, zero compute cost |
 | Daily, story, catalogue | studio pipeline, published as artifacts | determinism, QA, reviewability |
+
+### Profiles and difficulty tiers
+
+A *variant* is a detail level offered to the player for their own photo, and derives its region count
+from how much detail the photo happens to hold. A *profile* is a production recipe that states the
+count as a product decision and has to hit it. Each carries its own gate, because the profiles do
+not agree on what "good" means.
+
+| profile | regions | colours | canvas | zoom | build | session |
+|---|---|---|---|---|---|---|
+| `daily` | **55** | **10** | 1400 | **no** | ~2s | 3–5 min |
+| `library-easy` | 250 | 28 | 1400 | yes | ~5s | 10–15 min |
+| `library-medium` | 550 | 48 | 1900 | yes | ~10s | 25–40 min |
+| `library-hard` | 1200 | 88 | 2400 | yes | ~16s | 60–90 min |
+
+The library tiers exist to give the range decided in section 2 — roughly 100 to 1600 regions and 30
+to 100 colours — as explicit recipes rather than as whatever a given piece of art happens to produce.
+Add tiers freely; they are data, not code.
+
+Two measured facts that constrain tier design:
+
+- **Region counts are hit exactly** (asked 100/300/600/1000, got precisely those). Colour counts land
+  close and fall short above roughly 90: asking 96 yields 82–90, asking 140 yields 113–123.
+- **Colours must not exceed 0.4 × regions** (`COLOURS_PER_REGION_CEILING`). So a 100-colour canvas
+  needs at least 250 regions — which is reasonable, since 100 colours over 100 regions is absurd.
+- **Match the canvas size to the region count.** A low region count on a large canvas is *slower*,
+  because the second merge pass reduces tens of thousands of initial regions instead of hundreds:
+  52.3s for 100 regions at 1900px, against roughly 2s for the same count at 1400px.
 
 ### Generating art with AI
 
@@ -537,17 +602,42 @@ opened — permanently.
 
 ---
 
-## 12. Monetisation — PROPOSED
+## 12. Monetisation
 
-Via RevenueCat: premium story chapters, cosmetic packs, hint consumables, and a subscription
-removing whatever friction exists for free players.
+**Banner ads are the primary revenue, with a paid ad-removal.** DECIDED. This is the model the genre
+actually runs on, and it is where the money is. Removal is offered both as a monthly subscription and
+as a one-time purchase, so players who dislike subscriptions can still pay.
 
-Two recommendations:
+Secondary, via RevenueCat: premium story chapters, cosmetic packs, hint consumables. RevenueCat also
+owns the ad-removal entitlement, so one system answers "should this player see ads?" on both
+platforms.
 
-- **One currency for v1.** Two currencies before the loop is known to retain is economy design
-  without data.
-- **No banner ads.** The pitch is explicitly the absence of them, and they would undercut the calm
-  the app is selling.
+An earlier draft of this document recommended against banner ads. That was wrong about the business,
+and it is recorded here so the reversal is visible rather than silently overwritten.
+
+But it does change the pitch. Section 1 cannot claim "no banner ads" as a differentiator any more —
+the differentiators are the daily canvas, personal photos and story mode. What survives is
+**keeping ads out of the painting itself**, which is the part that actually matters:
+
+- **Never over the canvas, never mid-session.** No banner on the painting route, no interstitial
+  interrupting a painting in progress. The canvas is the product; an ad on it undoes the calm the
+  app is selling and there is no revenue case that repays that.
+- **Place them on browse and menu surfaces**, and consider an interstitial *after* a canvas is
+  completed — a natural break, when the player has just been rewarded rather than interrupted.
+- **The daily canvas is the most protected surface of all.** It is the habit loop; an ad in the way
+  of a streak is the fastest way to kill one.
+
+Two technical constraints, not preferences:
+
+- **Ad SDKs must not be loaded on the canvas route.** They are heavy, they allocate, and they run
+  their own render work. The canvas measures raster p50 10.0 ms on an old Huawei, and an ad SDK
+  sharing that frame budget is the most likely way to lose it.
+- **Consent handling is required before requesting ads** — GDPR/UMP in Europe, App Tracking
+  Transparency on iOS. Both affect what an ad request may contain. Worth reading the current
+  requirements for each platform rather than assuming, since they change.
+
+One more recommendation, unchanged: **one currency for v1.** Two currencies before the loop is known
+to retain is economy design without data.
 
 ---
 
@@ -581,14 +671,21 @@ Sequenced so expensive rewrites wait until the game is known to be fun.
 3. **A8 outline, partial disposal, Home kept alive** — 13 MB, then ~69 MB, then the UX fix
 4. **Progress persistence** — debounced plus lifecycle write. The largest functional gap
 5. ~~**Forced final merge**~~ — done. `guarantee_min_radius`, used by the `daily` profile
-6. **Vertical slice: Home tab, daily canvas, streak** — playtest before building five tabs
-7. ~~**Content pipeline**~~ — done. `pbn build`: profiles, gates, previews, manifest, review page.
-   Still to do: publish to R2, and decide the AI generation workflow
-8. **On-device UGC** — prototype the merge loop in Dart, then decide on C++
-9. **Fix `highlight` at 199 ms** — before region counts grow further
-10. **Vectors, if deep-zoom crispness justifies it** — shared edge graph, measured on device
+6. **Retention instrumentation** — cheap, and must land *before* the meta-game, or there is no
+   baseline to judge whether the meta-game did anything
+7. **Vertical slice: Home tab, daily canvas, streak** — playtest before building five tabs
+8. ~~**Content pipeline**~~ — done. `pbn build`: profiles, gates, previews, manifest, review page.
+   Still to do: publish to R2, and settle the AI generation workflow
+9. **Library tab and the catalogue** — table stakes, and the largest content cost
+10. **Ads and ad-removal** — primary revenue, so not optional. After the loop works, because ad
+    placement depends on knowing where the natural breaks are
+11. **On-device UGC** — prototype the merge loop in Dart, then decide on C++
+12. **Fix `highlight` at 199 ms** — before region counts grow further
+13. **Story mode and the RPG meta** — last by sequence, not by importance. It is the original idea
+    and the reason the app is not another catalogue
+14. **Vectors, if deep-zoom crispness justifies it** — shared edge graph, measured on device
 
-Deferred: Story map, Profile, monetisation, co-op. Cut from v1: Social.
+Cut from v1: Social. Deferred: Profile customisation, co-op.
 
 ---
 
@@ -605,6 +702,7 @@ Pipeline (`pipeline/pbn/`):
 | `COLOURS_PER_REGION_CEILING` | 0.40 | Palette ceiling relative to region count |
 | `FIXED_RADIUS_FLOOR` | 0.10 | Minimum region radius for zoomable canvases |
 | `profiles.DEFAULT_MIN_TAP_RADIUS_PX` | 14.0 | Tappability bar, non-zoomable. **Provisional** |
+| `daily` profile | 55 regions, 10 colours | Gated to 30–60 regions and exactly 10 colours |
 | `daily` profile `radius_floor` | 1.8 | Non-zoomable floor, with `guarantee_min_radius` |
 | `SUBJECT_DENSITY_BOOST` | 2.0 | Subject density relative to background. **Do not raise** |
 | `MAX_SUBJECT_SHARE` | 0.82 | Clamp only |
@@ -618,18 +716,37 @@ error, and two images got worse. Variants differ by **canvas size**, not palette
 
 ---
 
-## 16. Open questions
+## 16. Decided since the first draft
 
-1. **Does the RPG meta-game actually retain?** The entire premise, and nothing measures it yet.
-   Analytics is absent from every plan so far.
-2. **Where does the art come from, and at what rate?** The daily canvas alone is 365 pieces a year.
-3. **Is 24–47 regions enough for the daily canvas?** That is what floor 1.8 yields with the
-   tappability guarantee, against 3–5 minutes of intended play. The binding limit is absolute —
-   display area divided by finger area caps how many tappable regions can exist, whatever the canvas
-   resolution. More regions means either a lower tap-radius bar (wants a device read) or art with
-   more distinct large shapes, which is controllable since it is generated.
-4. **Is Dart fast enough for on-device conversion?** Answerable with one prototype of the merge loop.
-5. **Why does `highlight` scale with canvas rather than region count?** It is 36 ms at 417 regions
-   and 199 ms at 1600.
-6. **Formal performance gate.** `over 16 ms` read 65% on the test device, but with startup frames
+**Story mode and the RPG meta are staying.** They are the original idea and the reason the app is not
+just another catalogue. Scheduled late, after the loop is proven, but not in doubt.
+
+One recommendation attached to that: **add basic retention instrumentation early, before the meta
+exists.** Not analytics for its own sake — the premise of the whole design is that the RPG layer makes
+people come back, and that claim cannot be evaluated without a baseline measured *before* it ships.
+Daily and 7-day return, session length, canvases completed, and where sessions are abandoned are
+enough. Cheap to add now and impossible to backfill.
+
+**Art comes from AI generation.** Section 7 covers the workflow, prompting, and the gate.
+
+**The daily canvas is 10 colours and 30–60 regions.** Settled in section 2, and the profile is built
+and measured. The binding limit is worth remembering: display area divided by finger area caps how
+many tappable regions can exist at all, whatever the canvas resolution. So 30–60 is not a preference,
+it is close to the ceiling for a fixed canvas that must be entirely tappable.
+
+## 17. Still open
+
+1. **Is Dart fast enough for on-device photo conversion?** Answerable with one prototype of the merge
+   loop, which is 95% of the remaining cost and the case where Dart is strongest. If it lands under a
+   second, the C++ toolchain is avoided entirely.
+2. **Why does `highlight` scale with canvas rather than region count?** 36 ms at 417 regions, 199 ms
+   at 1600, on the test device. It is meant to cost per region, so the scaling indicates a defect.
+   The most likely thing to make the app feel worse as canvases grow.
+3. **Formal performance gate.** `over 16 ms` read 65% on the test device, but with startup frames
    included. Needs a clean read: reset, then one sustained pinch-zoom.
+4. **Is the 14px tap radius right?** Provisional, chosen because Material's 22px is for controls where
+   a miss does damage and painting forgives one. 22px would cap the daily canvas at 17–38 regions.
+   Wants a real-device read.
+5. **How strict should the daily colour gate be?** It currently demands exactly 10, and three of six
+   corpus images produced 9. Purpose-made art should clear it, but if it proves too strict in
+   practice the fix is one line — the risk is that a lot of otherwise good daily art gets rejected.
