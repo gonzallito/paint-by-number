@@ -72,23 +72,28 @@ DECIDED. The daily canvas cannot zoom, which removes the mechanism that makes sm
 workable elsewhere. That single constraint changes the pipeline configuration completely, and it is
 why the daily format needs its own variant rather than a tweak to an existing one.
 
-### The daily canvas has an unsolved blocker
+### The daily canvas needed a guarantee the merger could not give — now fixed
 
-Measured on illustration-style corpus art at the radius floor that otherwise works
-(`FIXED_RADIUS_FLOOR` raised to 1.4, giving 31–59 regions and 95–100% of numbers visible at 1x):
+Some regions resist merging at **every** radius floor. One test image retained a region 3.3 screen
+pixels across at floors 0.8, 1.4, 2.0 *and* 2.6: it was isolated by the subject silhouette, so every
+available merge was forbidden by `preserve_silhouette`.
 
-**Some regions resist merging at every floor tested.** One test image retained a region with a
-3.3-pixel on-screen radius at floors 0.8, 1.4, 2.0 *and* 2.6. These regions are isolated by the
-subject silhouette, so every available merge is forbidden by `preserve_silhouette`.
+On a zoomable canvas that is invisible — the player zooms in. On the daily canvas it is a painting
+that cannot be completed, which breaks the streak the whole daily loop depends on.
 
-On a zoomable canvas this is invisible — the player zooms in. **On the daily canvas it is a
-painting that cannot be completed**, which breaks the streak that the whole daily loop depends on.
+`RegionMerger.force_absorb_undersized()` now folds any region still under the floor into its largest
+neighbour, ignoring the silhouette rule, sweeping until stable because merging two blobs into a
+dumbbell can itself *lower* effective radius. It runs after the budget passes and will take the
+count below budget if it must: on a fixed canvas the guarantee is worth more than the exact count.
 
-Required before the daily tab can ship: a final forced merge pass that folds any region still under
-the floor into its largest neighbour, ignoring the silhouette rule. This does not exist yet.
+Enabled by `guarantee_min_radius`, which the `daily` profile sets and the upload path does not.
+Measured at floor 1.8 on illustration art: **24–47 regions, 0% under 14 screen pixels, 100% of
+numbers visible without zooming.**
 
-Also DECIDED: the radius floor should be *derived*, not chosen. For a non-zoomable canvas shown at
-a known size, the required region radius is `finger_px / display_scale`. A formula, not a constant.
+The 14px bar is PROPOSED, not settled. It is deliberately below the 22px that Material's 44px touch
+target implies, because that figure is for controls which must be hit first time and where a miss
+does something wrong. Painting is forgiving — a miss does nothing. The 22px bar caps the daily canvas
+at 17–38 regions, too short a session on some art. **This wants a real-device read.**
 
 ---
 
@@ -268,6 +273,10 @@ source images for on-device conversion. The reasons:
 **Therefore the Python pipeline is the studio tool and must be kept.** It never ships inside the
 app. Deleting it in favour of on-device-only conversion would mean hand-authoring every canvas.
 
+This is built: `pbn build` walks a directory of source art, converts each piece with its declared
+profile, grades it against that profile's gate, publishes what passes, and writes a manifest plus a
+thumbnail review page. See "Building curated content" in the root README.
+
 The split:
 
 | content | converted | why |
@@ -275,19 +284,30 @@ The split:
 | Player photos (UGC) | on device, eventually | privacy, offline, zero compute cost |
 | Daily, story, catalogue | studio pipeline, published as artifacts | determinism, QA, reviewability |
 
-### Generating art with AI — PROPOSED
+### Generating art with AI
+
+**Never let AI generate the numbered image.** It can draw line art with numbers, and the result is
+useless: the app needs a region index per pixel, a palette, and per-region geometry, not a picture.
+AI numbers correspond to no real palette, guarantee nothing, are not reproducible, and cannot be
+fixed. AI generates the **colour illustration**; the pipeline is the only thing that produces canvas
+data. The colour output doubles as the library preview.
 
 1. **Prompt for what the pipeline handles well**: flat vector illustration, limited palette, clean
    outlines, *no gradients, no texture, no film grain*. AI output defaults to subtle noise, which is
    exactly what makes region counts explode. Generate large; the pipeline downscales.
-2. **Batch convert** through the CLI.
-3. **Automated gate** on metrics the pipeline already reports — reject if `unlabelled_fraction > 0`,
-   `merges_blocked` is true, region or colour count is out of band, or any region is untappable at
-   the intended display size.
-4. **Human review** of survivors. Publish approved artifacts to R2 with a manifest.
-5. **Pin curated artifacts.** Unlike player photos, curated content must *not* auto-reconvert when
-   `CONVERSION_VERSION` changes — that would silently alter art already approved and shipped.
-   Re-convert deliberately, re-review, re-publish.
+2. **Batch convert** — `pbn build`.
+3. **Automated gate**, per profile: region and colour bands, `unlabelled_fraction`, and for a
+   non-zoomable profile every region's on-screen radius and full number visibility at 1x.
+4. **Human review** — `report.html` is a thumbnail grid with failures spelled out, because nothing
+   automatic can tell whether a canvas is *pleasant* to paint.
+5. **Pin curated artifacts.** Rebuilds are skipped unless the source bytes, profile or
+   `CONVERSION_VERSION` change, so published art is never silently replaced. `--force` reconverts
+   deliberately, and drift on identical inputs is reported as `NOT REPRODUCIBLE` rather than
+   quietly diverging from what is already live.
+
+Measured build cost: roughly 2s per daily canvas, 5s easy, 10s medium, 16s hard. A thousand-canvas
+library is a few hours of unattended compute. Published bundle sizes: ~70KB for a daily canvas,
+~750KB for library-hard.
 
 Licensing note: whether AI-generated art may be used commercially depends on the specific
 generator's terms, which differ. Check the terms of whichever tool is chosen.
@@ -560,9 +580,10 @@ Sequenced so expensive rewrites wait until the game is known to be fun.
 2. **gzip, then pack the `regions` table** — 11.3x network free, then 17x off the largest allocation
 3. **A8 outline, partial disposal, Home kept alive** — 13 MB, then ~69 MB, then the UX fix
 4. **Progress persistence** — debounced plus lifecycle write. The largest functional gap
-5. **Forced final merge** — removes untappable regions. Gates the daily canvas
+5. ~~**Forced final merge**~~ — done. `guarantee_min_radius`, used by the `daily` profile
 6. **Vertical slice: Home tab, daily canvas, streak** — playtest before building five tabs
-7. **Content pipeline** — AI generation, automated gate, R2 publishing
+7. ~~**Content pipeline**~~ — done. `pbn build`: profiles, gates, previews, manifest, review page.
+   Still to do: publish to R2, and decide the AI generation workflow
 8. **On-device UGC** — prototype the merge loop in Dart, then decide on C++
 9. **Fix `highlight` at 199 ms** — before region counts grow further
 10. **Vectors, if deep-zoom crispness justifies it** — shared edge graph, measured on device
@@ -582,7 +603,9 @@ Pipeline (`pipeline/pbn/`):
 | `TARGET_REGION_AREA_PX` | 3200 | Comfortable region area |
 | `TARGET_REGIONS_MIN` / `MAX` | 100 / 1600 | Region count bounds |
 | `COLOURS_PER_REGION_CEILING` | 0.40 | Palette ceiling relative to region count |
-| `FIXED_RADIUS_FLOOR` | 0.10 | Minimum region radius; **needs ~1.4 for the daily canvas** |
+| `FIXED_RADIUS_FLOOR` | 0.10 | Minimum region radius for zoomable canvases |
+| `profiles.DEFAULT_MIN_TAP_RADIUS_PX` | 14.0 | Tappability bar, non-zoomable. **Provisional** |
+| `daily` profile `radius_floor` | 1.8 | Non-zoomable floor, with `guarantee_min_radius` |
 | `SUBJECT_DENSITY_BOOST` | 2.0 | Subject density relative to background. **Do not raise** |
 | `MAX_SUBJECT_SHARE` | 0.82 | Clamp only |
 | `DEDUPE_DELTA_E` | 3.0 | Below this, two colours are the same |
@@ -600,9 +623,11 @@ error, and two images got worse. Variants differ by **canvas size**, not palette
 1. **Does the RPG meta-game actually retain?** The entire premise, and nothing measures it yet.
    Analytics is absent from every plan so far.
 2. **Where does the art come from, and at what rate?** The daily canvas alone is 365 pieces a year.
-3. **What is the daily canvas's region count band?** Measured 31–59 at floor 1.4 on test art, and
-   3–5 minutes suggests 60–120. The art must be authored to land in band — which is controllable,
-   since it is generated.
+3. **Is 24–47 regions enough for the daily canvas?** That is what floor 1.8 yields with the
+   tappability guarantee, against 3–5 minutes of intended play. The binding limit is absolute —
+   display area divided by finger area caps how many tappable regions can exist, whatever the canvas
+   resolution. More regions means either a lower tap-radius bar (wants a device read) or art with
+   more distinct large shapes, which is controllable since it is generated.
 4. **Is Dart fast enough for on-device conversion?** Answerable with one prototype of the merge loop.
 5. **Why does `highlight` scale with canvas rather than region count?** It is 36 ms at 417 regions
    and 199 ms at 1600.

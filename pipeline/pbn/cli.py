@@ -79,6 +79,23 @@ def main() -> int:
         help="also write artifact bundles (display.png, regions.png, meta.json) here",
     )
 
+    p_build = sub.add_parser(
+        "build", help="convert curated source art into publishable canvas artifacts"
+    )
+    p_build.add_argument("--sources", default="../content/sources", help="source art directory")
+    p_build.add_argument("--out", default="../content", help="where artifacts and reports go")
+    p_build.add_argument(
+        "--profile",
+        default=None,
+        help="profile for sources with no artwork.toml (default: library-medium)",
+    )
+    p_build.add_argument(
+        "--force", action="store_true", help="reconvert even when nothing has changed"
+    )
+    p_build.add_argument("--only", default=None, help="build ids or collections matching this")
+
+    sub.add_parser("profiles", help="list content profiles and their acceptance criteria")
+
     args = parser.parse_args()
 
     if args.command == "doctor":
@@ -99,6 +116,41 @@ def main() -> int:
             artifact_dir=args.artifacts,
             stylise_input=args.stylise,
         )
+
+    if args.command == "profiles":
+        from pbn import profiles
+
+        print(f"{'profile':16s} {'regions':>8s} {'colours':>8s} {'canvas':>7s} {'zoom':>5s}  gate")
+        for name, profile in profiles.PROFILES.items():
+            gate = (
+                f"{profile.min_regions}-{profile.max_regions} regions, "
+                f">={profile.min_colours} colours"
+            )
+            if not profile.zoomable:
+                gate += (
+                    f", every region >={profile.min_tap_radius_px:.0f}px at "
+                    f"{profile.display_size[0]}x{profile.display_size[1]}"
+                )
+            print(
+                f"{name:16s} {profile.target_regions:8d} {profile.n_colours:8d} "
+                f"{profile.canvas_long_edge:7d} {'yes' if profile.zoomable else 'NO':>5s}  {gate}"
+            )
+            print(f"{'':16s} {profile.description}")
+        return 0
+
+    if args.command == "build":
+        from pbn import build as build_module
+        from pbn import profiles
+
+        results = build_module.build(
+            sources_root=args.sources,
+            out_root=args.out,
+            default_profile=args.profile or profiles.DEFAULT_PROFILE,
+            force=args.force,
+            only=args.only,
+        )
+        failed = sum(1 for r in results if r.status in {"rejected", "error"})
+        return 1 if failed else 0
 
     parser.error(f"unknown command: {args.command}")
     return 2

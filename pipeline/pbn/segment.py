@@ -465,6 +465,51 @@ class _Merger:
                 if self._undersized(survivor) or self._undersized(other):
                     self._push(heap, survivor, other)
 
+    def force_absorb_undersized(self) -> int:
+        """Last resort: fold every remaining undersized region into its largest neighbour.
+
+        Ignores ``_legal``, which is the entire point. Some regions are isolated by the silhouette
+        so that *every* available merge is forbidden, and they survive at any radius floor —
+        measured on one corpus image, a region 3.3 screen pixels across persisted at floors 0.8,
+        1.4, 2.0 and 2.6.
+
+        Where the player can zoom that is invisible. Where they cannot, it is a region they
+        physically cannot tap, so the painting can never be completed. For a fixed canvas the
+        guarantee is worth more than the silhouette, and more than hitting the exact region count:
+        this runs *after* the budget passes and will take the count below budget if it must.
+
+        Merging can itself lower effective radius — two blobs joined by a thin neck gain perimeter
+        as well as area — so this sweeps until nothing changes rather than once. Termination is
+        guaranteed because every pass that sets ``changed`` removes a region.
+
+        Returns the number of merges performed.
+        """
+        merged = 0
+        changed = True
+        while changed and self.remaining > 1:
+            changed = False
+            for i in range(self.n):
+                if not self.alive[i] or not self._undersized(i):
+                    continue
+                largest = -1
+                largest_area = -1.0
+                for other in self.neighbours[i]:
+                    if not self.alive[other]:
+                        continue
+                    if self.area[other] > largest_area:
+                        largest_area = self.area[other]
+                        largest = other
+                if largest < 0:
+                    # No living neighbour at all. Nothing can absorb it, and nothing else will
+                    # help; the caller's acceptance gate is what should catch this.
+                    continue
+                self._merge(i, largest)
+                merged += 1
+                changed = True
+                if self.remaining <= 1:
+                    break
+        return merged
+
     def count_side(self, subject_side: bool) -> int:
         """Living regions on one side of the silhouette."""
         return int(
@@ -545,6 +590,7 @@ def segment(
     min_radius_scale: float = DEFAULT_MIN_RADIUS_SCALE,
     subject_budget_share: float = DEFAULT_SUBJECT_BUDGET_SHARE,
     background_region_cap: int | None = None,
+    guarantee_min_radius: bool = False,
 ) -> Segmentation:
     """Extract regions from a quantised image and merge them.
 
@@ -552,6 +598,10 @@ def segment(
     the resolution-derived minimum effective radius, so a variant can trade comfortable tap
     targets against detail. ``subject_budget_share`` is the fraction of the region budget
     reserved for the subject, independent of how much of the frame it occupies.
+
+    ``guarantee_min_radius`` adds a final forced pass so that no region finishes below the floor,
+    at the cost of possibly landing under ``budget``. Required for a canvas the player cannot zoom,
+    where an untappable region makes the painting impossible to finish.
     """
     labels, region_colour = _initial_regions(
         quantised, n_colours, subject_mask if preserve_silhouette else None
@@ -627,6 +677,9 @@ def segment(
         merger.reduce_to(background_target, subject_side=False)
     else:
         merger.reduce_to(budget)
+
+    if guarantee_min_radius:
+        merger.force_absorb_undersized()
 
     blocked = merger.unsatisfied(budget)
     labels = merger.parent_map()[labels]

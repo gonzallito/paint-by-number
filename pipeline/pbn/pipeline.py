@@ -269,6 +269,8 @@ def _segment_to_target(
     target: int,
     subject_share: float,
     background_cap: int | None,
+    guarantee_min_radius: bool = False,
+    radius_floor: float | None = None,
 ):
     """Segment to roughly ``target`` regions.
 
@@ -290,6 +292,8 @@ def _segment_to_target(
       of regions while asking for 72%.
     """
 
+    floor_scale = FIXED_RADIUS_FLOOR if radius_floor is None else radius_floor
+
     if ONE_SHOT_SEGMENTATION:
         # One segmentation at a fixed floor, then trim to the exact target.
         #
@@ -308,11 +312,12 @@ def _segment_to_target(
             quantised.palette_lab,
             budget=target,
             subject_mask=mask,
-            min_radius_scale=FIXED_RADIUS_FLOOR,
+            min_radius_scale=floor_scale,
             subject_budget_share=subject_share,
             background_region_cap=background_cap,
+            guarantee_min_radius=guarantee_min_radius,
         )
-        return FIXED_RADIUS_FLOOR, result
+        return floor_scale, result
 
     def evaluate(scale: float):
         return segment.segment(
@@ -325,6 +330,7 @@ def _segment_to_target(
             min_radius_scale=scale,
             subject_budget_share=subject_share,
             background_region_cap=background_cap,
+            guarantee_min_radius=guarantee_min_radius,
         )
 
     low, high = FLOOR_SEARCH_LOW, FLOOR_SEARCH_HIGH
@@ -363,6 +369,9 @@ def convert(
     model_cache: str | Path = ".cache/models",
     detect_faces: bool = True,
     stylise_input: bool = False,
+    target_regions: int | None = None,
+    guarantee_min_radius: bool = False,
+    radius_floor: float | None = None,
 ) -> Conversion:
     """Convert one image at one detail level.
 
@@ -432,7 +441,15 @@ def convert(
     )
     timings["flatten"] = time.perf_counter() - t
 
-    target = target_region_count(working.shape[:2], variant)
+    # An explicit target lets a content profile ask for "300 regions" directly. Deriving it from
+    # canvas area and grain is right for uploads, where the photo decides how much detail exists,
+    # but wrong for curated content, where the difficulty tier is a product decision and has to be
+    # hit exactly rather than approximately.
+    target = (
+        int(np.clip(target_regions, TARGET_REGIONS_MIN, TARGET_REGIONS_MAX))
+        if target_regions is not None
+        else target_region_count(working.shape[:2], variant)
+    )
     # Requesting more colours than the regions can host just returns fewer after pruning, so the
     # request is clamped to what is hostable. Keeps the palette honest and avoids computing k-means
     # clusters that are discarded immediately.
@@ -470,7 +487,15 @@ def convert(
 
     t = time.perf_counter()
     floor, seg = _segment_to_target(
-        quantised, boundary_labels, lab, mask, target, subject_share, None
+        quantised,
+        boundary_labels,
+        lab,
+        mask,
+        target,
+        subject_share,
+        None,
+        guarantee_min_radius,
+        radius_floor,
     )
     timings["segment"] = time.perf_counter() - t
 

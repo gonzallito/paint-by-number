@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pbn import ARTIFACT_FORMAT_VERSION, images
+from pbn import ARTIFACT_FORMAT_VERSION, images, render
 from pbn.pipeline import RECOMMENDED_VARIANT
 
 # Region ids are encoded across three 8-bit channels, so this is the ceiling. Region counts are
@@ -145,12 +145,48 @@ def build_meta(conversion) -> dict:
     }
 
 
-def write_bundle(conversion, directory: str | Path, display: np.ndarray) -> Path:
-    """Write ``display.png``, ``regions.png`` and ``meta.json`` into ``directory``."""
+# Thumbnail long edge. 512 covers a two- or three-column grid on a high-density phone without
+# shipping a second full-size image.
+PREVIEW_LONG_EDGE = 512
+
+
+def write_preview(conversion, directory: str | Path, long_edge: int = PREVIEW_LONG_EDGE) -> Path:
+    """Write ``preview.webp``: the finished artwork, downscaled.
+
+    The *reconstruction* rather than the source illustration, deliberately. It is exactly what the
+    player will end up with, so browsing the library never promises detail or colour the canvas
+    cannot deliver. It also means the source art does not have to ship.
+
+    WebP because these are flat-colour images with hard edges, where it is far smaller than JPEG at
+    equal quality and has none of JPEG's ringing along region borders.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    painted = render.filled_canvas(
+        conversion.labels, conversion.region_colour, conversion.palette_rgb
+    )
+    path = directory / "preview.webp"
+    images.save(path, images.fit_long_edge(painted, long_edge))
+    return path
+
+
+def write_bundle(
+    conversion,
+    directory: str | Path,
+    display: np.ndarray,
+    preview: bool = False,
+) -> Path:
+    """Write ``display.png``, ``regions.png`` and ``meta.json`` into ``directory``.
+
+    ``preview`` additionally writes ``preview.webp``. Off by default because the conversion service
+    has no use for it — only the curated library needs browsable thumbnails.
+    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
     images.save(directory / "display.png", display)
     images.save(directory / "regions.png", encode_region_map(conversion.labels))
     (directory / "meta.json").write_text(json.dumps(build_meta(conversion), indent=2))
+    if preview:
+        write_preview(conversion, directory)
     return directory
